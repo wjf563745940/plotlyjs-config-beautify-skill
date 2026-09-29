@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN" style="font-size: 25px;">
+
+<head>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <meta charset="UTF-8">
+    <title>Plotly.js 多图表解析演示</title>
+    <!-- CDN引入 plotly.js -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {
+            font-family: "Microsoft YaHei", sans-serif;
+            margin: 16px;
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin: 12px 0;
+        }
+
+        button {
+            padding: 4px 12px;
+            cursor: pointer;
+        }
+
+        .chart-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 20px;
+        }
+
+        .chart-card h4 {
+            margin: 4px 0 8px;
+            font-size: 14px;
+            color: #374151;
+        }
+
+        .chart-item {
+            width: 100%;
+            min-height: 400px;
+        }
+
+        pre {
+            max-height: 300px;
+            overflow: auto;
+            background: #f5f5f5;
+            padding: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h3>Plotly 多图表渲染 + 数据解析输出</h3>
+    <div id="summary">加载中…</div>
+
+    <div class="toolbar">
+        <button onclick="parseChartData()">解析图表数据</button>
+        <button onclick="updateChart()">更新图表数据</button>
+        <label><input type="checkbox" id="fullDump"> 输出完整 data（体积很大）</label>
+    </div>
+
+    <div id="charts"></div>
+    <pre id="output"></pre>
+
+    <script src="mocks/mock1.js"></script>
+    <script>
+        // ========== 0. 类型化数组解码（后端 numpy 常用 {dtype, bdata, shape} 传输） ==========
+        const DTYPE_MAP = {
+            f8: Float64Array, f4: Float32Array,
+            i8: BigInt64Array, i4: Int32Array, i2: Int16Array, i1: Int8Array,
+            u8: BigUint64Array, u4: Uint32Array, u2: Uint16Array, u1: Uint8Array,
+            b1: Uint8Array
+        };
+
+        function base64ToArrayBuffer(b64) {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes.buffer;
+        }
+
+        // 把 {dtype:'f8', bdata:'...', shape:'173, 2'} 还原成普通数组 / 二维数组
+        function decodeTyped(obj) {
+            const Ctor = DTYPE_MAP[obj.dtype] || Float64Array;
+            const flat = new Ctor(base64ToArrayBuffer(obj.bdata));
+
+            let shape = obj.shape;
+            if (typeof shape === 'string') shape = shape.split(',').map(s => Number(s.trim()));
+
+            if (Array.isArray(shape) && shape.length > 1) {
+                const cols = shape[1];
+                const rows = [];
+                for (let i = 0; i < flat.length; i += cols) {
+                    rows.push(Array.from(flat.subarray(i, i + cols)));
+                }
+                return rows;
+            }
+            return Array.from(flat);
+        }
+
+        // 深度遍历，把轨迹里所有类型化数组还原成普通数组
+        function normalizeTrace(trace) {
+            const walk = (val) => {
+                if (Array.isArray(val)) return val.map(walk);
+                if (val && typeof val === 'object') {
+                    if (typeof val.bdata === 'string' && val.dtype) return decodeTyped(val);
+                    const out = {};
+                    for (const k in val) out[k] = walk(val[k]);
+                    return out;
+                }
+                return val;
+            };
+            return walk(trace);
+        }
+
+        // ========== 0.2 标题自动换行 + 布局兜底 ==========
+        const TITLE_FONT_SIZE = 16;
+        const DEFAULT_MARGIN = { t: 80, l: 60, r: 30, b: 60 };
+
+        // 按容器宽度估算字符宽度，把长标题拆成多行（Plotly 用 <br> 换行）
+        function wrapTitleText(value, fontSize, chartWidth) {
+            if (typeof value !== 'string' || !value) return [value];
+            // 含 HTML 标签时不做拆分，避免破坏标签结构
+            if (/<[^>]+>/.test(value)) return [value];
+
+            const maxWidth = chartWidth - 32;
+            if (maxWidth <= 0) return [value];
+
+            const size = Number(fontSize) || TITLE_FONT_SIZE;
+            const lines = [];
+            let line = '';
+            let lineWidth = 0;
+
+            Array.from(value).forEach(character => {
+                const widthRatio = /\s/.test(character) ? 0.35 : character.charCodeAt(0) <= 255 ? 0.6 : 1;
+                const characterWidth = size * widthRatio;
+                if (line && lineWidth + characterWidth > maxWidth) {
+                    lines.push(line.replace(/\s+$/, ''));
+                    line = /^\s$/.test(character) ? '' : character;
+                    lineWidth = line ? characterWidth : 0;
+                    return;
+                }
+                line += character;
+                lineWidth += characterWidth;
+            });
+            if (line) lines.push(line);
+            return lines.length ? lines : [value];
+        }
+
+        function getRenderLayout(layout, dom, height) {
+            const nextLayout = Object.assign({}, layout);
+            nextLayout.autosize = true;
+            nextLayout.height = height;
+
+            if (nextLayout.title) {
+                nextLayout.margin = Object.assign({}, DEFAULT_MARGIN, layout.margin);
+
+                if (typeof nextLayout.title === 'string') {
+                    const lines = wrapTitleText(nextLayout.title, TITLE_FONT_SIZE, dom.clientWidth);
+                    nextLayout.margin.t = nextLayout.margin.t + (lines.length - 1) * 20;
+                    nextLayout.title = { text: lines.join('<br>'), automargin: true, pad: { t: 16 } };
+                } else {
+                    const lines = wrapTitleText(
+                        nextLayout.title.text,
+                        (nextLayout.title.font && nextLayout.title.font.size) || TITLE_FONT_SIZE,
+                        dom.clientWidth
+                    );
+                    nextLayout.margin.t = nextLayout.margin.t + (lines.length - 1) * 20;
+                    nextLayout.title = Object.assign({}, nextLayout.title, {
+                        automargin: nextLayout.title.automargin !== false,
+                        pad: Object.assign({ t: 16 }, nextLayout.title.pad),
+                        font: Object.assign({}, nextLayout.title.font, { size: TITLE_FONT_SIZE }),
+                        text: lines.join('<br>'),
+                    });
+                }
+            }
+
+            // 图例超出绘图区时自动挤压布局，避免被裁掉
+            if (nextLayout.legend && typeof nextLayout.legend.automargin === 'undefined') {
+                nextLayout.legend = Object.assign({}, nextLayout.legend, { automargin: true });
+            }
+            return nextLayout;
+        }
+
+        // ========== 1. 一次渲染多个 plotly 图表 ==========
+        const chartsRoot = document.getElementById('charts');
+        // window.mockData 现在是数组：[{data, layout, config}, ...]
+        const chartList = Array.isArray(window.mockData) ? window.mockData : [window.mockData];
+        const plotDoms = [];   // 保存每个图表的容器 DOM
+        const plots = [];      // 保存每个 Plotly 实例（Promise）
+
+        chartList.forEach((item, index) => {
+            const card = document.createElement('div');
+            card.className = 'chart-card';
+
+            const titleText = item.layout && item.layout.title && item.layout.title.text || '(无标题)';
+            const head = document.createElement('h4');
+            head.innerText = `#${index + 1} ${titleText}`;
+            card.appendChild(head);
+
+            const dom = document.createElement('div');
+            dom.className = 'chart-item';
+            const chartHeight = (item.layout && Number(item.layout.height)) || 520;
+            dom.style.height = chartHeight + 'px';
+            card.appendChild(dom);
+            chartsRoot.appendChild(card);
+
+            const data = (item.data || []).map(normalizeTrace);
+            // 未显式声明 responsive 时默认开启自适应
+            const config = Object.assign({ responsive: true }, item.config || {});
+            // 标题自动换行 + 边距/图例兜底（需在 append 之后调用，才能拿到 clientWidth）
+            const layout = getRenderLayout(item.layout || {}, dom, chartHeight);
+
+            try {
+                plots[index] = Plotly.newPlot(dom, data, layout, config);
+                plotDoms[index] = dom;
+
+                // 每个图表单独绑定点击事件
+                dom.on('plotly_click', function (evt) {
+                    const point = evt.points[0];
+                    console.log(`图表#${index + 1} 点击的点：`, point);
+                    alert(`图表#${index + 1} 点击点 x=${point.x}, y=${point.y}, 曲线名称:${point.data.name}`);
+                });
+            } catch (err) {
+                console.error(`图表#${index + 1} 渲染失败：`, err);
+                dom.innerText = `图表#${index + 1} 渲染失败：${err.message}`;
+            }
+        });
+
+        document.getElementById('summary').innerText =
+            `共加载 ${chartList.length} 个图表，成功渲染 ${plotDoms.filter(Boolean).length} 个。`;
+
+        // ========== 2. 核心：解析所有 Plotly 图表数据 ==========
+        function parseChartData() {
+            const full = document.getElementById('fullDump').checked;
+
+            const result = plotDoms.map((dom, i) => {
+                if (!dom) return { 序号: i + 1, 状态: '渲染失败' };
+
+                const data = dom.data;          // 原始 data
+                const layout = dom.layout;      // 原始 layout
+                const _fullData = dom._fullData; // 补全默认值后的底层数据
+
+                const item = {
+                    序号: i + 1,
+                    轨迹数量: data.length,
+                    图表标题: layout.title && layout.title.text || '(无标题)',
+                    轨迹列表: data.map((t, ti) => ({
+                        索引: ti,
+                        类型: t.type,
+                        名称: t.name || '',
+                        X前3个: Array.isArray(t.x) ? t.x.slice(0, 3) : (t.x !== undefined ? '(非数组)' : undefined),
+                        Y前3个: Array.isArray(t.y) ? t.y.slice(0, 3) : (t.y !== undefined ? '(非数组)' : undefined),
+                        数据点数: Array.isArray(t.y) ? t.y.length : (Array.isArray(t.x) ? t.x.length : undefined)
+                    })),
+                    默认补全后的类型: _fullData ? _fullData.map(t => t.type) : []
+                };
+                if (full) item.完整原始data = data;
+                return item;
+            });
+
+            document.getElementById('output').innerText = JSON.stringify(result, null, 2);
+        }
+
+        // ========== 3. 更新所有图表数据（restyle 只改数据，不重绘布局） ==========
+        function updateChart() {
+            plotDoms.forEach((dom, i) => {
+                if (!dom || !dom.data) return;
+
+                const indices = [];
+                const ys = [];
+                dom.data.forEach((trace, ti) => {
+                    // 只对数值型 y 数组做更新（sankey 等无 y 的轨迹跳过）
+                    if (Array.isArray(trace.y) && trace.y.length && typeof trace.y[0] === 'number') {
+                        indices.push(ti);
+                        ys.push(trace.y.map(v => Number((v * (0.85 + Math.random() * 0.3)).toFixed(2))));
+                    }
+                });
+
+                if (indices.length) {
+                    Plotly.restyle(dom, { y: ys }, indices);
+                    console.log(`图表#${i + 1} 已更新轨迹：`, indices);
+                }
+            });
+        }
+    </script>
+</body>
+
+</html>
