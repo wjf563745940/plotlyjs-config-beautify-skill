@@ -264,10 +264,37 @@
     function repairHierarchy(trace, warnings) {
         if (!['treemap', 'sunburst', 'icicle'].includes(trace.type) || !Array.isArray(trace.labels) || !Array.isArray(trace.parents)) return;
         const ids = Array.isArray(trace.ids) ? trace.ids : trace.labels;
+        if (trace.parents.length !== ids.length) {
+            // A missing first root slot is repairable only when shifted metadata
+            // independently identifies every leaf and the proposed tree is acyclic.
+            const count = ids.length;
+            const metadata = trace.customdata;
+            const shifted = trace.parents.length === count - 1 && String(trace.parents[0]) === String(ids[0]) &&
+                Array.isArray(metadata) && metadata.length === count - 1 && metadata.some(Array.isArray) &&
+                metadata.every((row, i) => row == null || Array.isArray(row) &&
+                    (row.includes(trace.labels[i + 1]) || row.includes(ids[i + 1])));
+            const proposed = ['', ...trace.parents];
+            const index = new Map(ids.map((id, i) => [String(id), i]));
+            const valid = shifted && index.size === count && proposed.every((parent, i) => {
+                const seen = new Set([i]);
+                while (parent !== '' && parent != null) {
+                    const next = index.get(String(parent));
+                    if (next === undefined || seen.has(next)) return false;
+                    seen.add(next);
+                    parent = proposed[next];
+                }
+                return true;
+            });
+            if (!valid) throw new Error('Invalid hierarchy array alignment; cannot infer missing parent entries.');
+            trace.parents = proposed;
+            for (const key of ['customdata', 'text', 'hovertext', 'hovertemplate']) {
+                if (Array.isArray(trace[key]) && trace[key].length === count - 1) trace[key].unshift(null);
+            }
+            warnings.push('层级图缺少根节点的 parents/customdata 首项；已由叶节点元数据对应关系确认并补齐，数值与颜色保留。');
+        }
         const known = new Set(ids.map(String));
         const missing = [...new Set(trace.parents.filter(parent => parent !== '' && parent !== null).map(String))]
             .filter(parent => !known.has(parent));
-        if (!missing.length) return;
         const originalCount = trace.labels.length;
         for (const parent of missing) {
             const children = trace.parents.map((value, i) => String(value) === parent ? i : -1).filter(i => i >= 0);
@@ -284,14 +311,32 @@
             }
             if (trace.marker && Array.isArray(trace.marker.colors)) trace.marker.colors.push(trace.marker.colors[first]);
         }
-        warnings.push('补齐层级图缺失父节点：' + missing.join('、') + '；total 父值由现有子节点求和。');
+        if (missing.length) warnings.push('补齐层级图缺失父节点：' + missing.join('、') + '；total 父值由现有子节点求和。');
+        if (trace.branchvalues === undefined && Array.isArray(trace.values) && trace.values.length === trace.labels.length &&
+            trace.values.every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) {
+            const sums = new Map();
+            trace.parents.forEach((parent, i) => {
+                if (parent !== '' && parent != null) sums.set(String(parent), (sums.get(String(parent)) || 0) + trace.values[i]);
+            });
+            const tolerance = value => Math.max(1, value) * 1e-6;
+            const aggregateRoot = trace.parents.some((parent, i) => (parent === '' || parent == null) &&
+                sums.has(String(ids[i])) && trace.values[i] > 0 &&
+                Math.abs(trace.values[i] - sums.get(String(ids[i]))) <= tolerance(trace.values[i]));
+            const validTotals = trace.labels.every((label, i) => !sums.has(String(ids[i])) ||
+                trace.values[i] + tolerance(trace.values[i]) >= sums.get(String(ids[i])));
+            if (aggregateRoot && validTotals) {
+                trace.branchvalues = 'total';
+                warnings.push('层级图根值等于直属子节点之和，且所有父值覆盖子值；按 total 解释面积，保留原数值。');
+            }
+        }
     }
 
-    function fitAxes(data, layout, panels, plotWidth) {
+    function fitAxes(data, layout, panels, plotWidth, warnings) {
         for (const [key, axis] of Object.entries(layout)) {
             if (!/^[xy]axis\d*$/.test(key) || !axis) continue;
             axis.automargin = true;
             axis.tickfont = Object.assign({}, axis.tickfont, { size: Math.min(number(axis.tickfont && axis.tickfont.size, 10), 10) });
+            if (key[0] === 'x') axis.ticklabelstandoff = Math.max(number(axis.ticklabelstandoff, 0), 8);
             if (axis.title) {
                 axis.title = typeof axis.title === 'string' ? { text: axis.title } : axis.title;
                 axis.title.font = Object.assign({}, axis.title.font, { size: Math.min(number(axis.title.font && axis.title.font.size, 11), 11) });
@@ -300,8 +345,17 @@
             }
             if (key[0] !== 'x' || axis.tickvals || axis.showticklabels === false) continue;
             const ref = key[0] + key.slice(5);
-            const values = data.filter(t => (t.xaxis || 'x') === ref).flatMap(t => Array.isArray(t.x) ? t.x : []);
+            const traces = data.filter(t => (t.xaxis || 'x') === ref && Array.isArray(t.x) && t.x.length);
+            const values = traces.flatMap(t => t.x);
             const categories = [...new Set(values.filter(value => typeof value === 'string'))];
+            const dates = categories.map(value => /^\d{4}-\d\d-\d\d(?:T|$)/.test(value) ? Date.parse(value.slice(0, 10)) : NaN).sort((a, b) => a - b);
+            const gaps = dates.slice(1).map((value, i) => value - dates[i]).filter(gap => gap > 0);
+            if (!axis.type && !axis.range && !axis.matches && !axis.rangebreaks && traces.length &&
+                traces.every(trace => trace.type === 'bar' && trace.orientation !== 'h') && categories.length >= 2 && categories.length <= 12 &&
+                dates.every(Number.isFinite) && gaps.length && Math.min(...gaps) / (dates.at(-1) - dates[0]) * plotWidth < 3) {
+                Object.assign(axis, { type: 'category', categoryorder: 'array', categoryarray: categories.slice() });
+                warnings.push('稀疏日期柱形按事件类别排列，以保证柱宽；日期和数值保留，横轴不表示连续时间间隔。');
+            }
             const categoryAxis = axis.type === 'category' || axis.type === 'multicategory' ||
                 (categories.length && categories.every(value => !/^\d{4}-\d\d(?:-\d\d)?(?:T|$)/.test(value)));
             if (axis.type === 'multicategory') continue;
@@ -312,7 +366,11 @@
                     : categories;
                 axis.tickmode = 'array';
                 axis.tickvals = picked;
-                axis.ticktext = picked.map(value => wrapText(value, 10, plotWidth / picked.length - 6).text);
+                // Sampling can leave adjacent categories; their positions do not spread out.
+                const indices = picked.map(value => categories.indexOf(value));
+                const minimumGap = indices.slice(1).reduce((gap, index, i) => Math.min(gap, index - indices[i]), categories.length);
+                const labelWidth = plotWidth * minimumGap / categories.length - 8;
+                axis.ticktext = picked.map(value => wrapText(value, 10, Math.max(20, labelWidth)).text);
                 axis.tickangle = 0;
             } else {
                 axis.nticks = Math.min(number(axis.nticks, 4), 4);
@@ -324,9 +382,57 @@
                 for (const key of ['angularaxis', 'radialaxis']) {
                     const axis = layout[ref][key] = layout[ref][key] || {};
                     axis.tickfont = Object.assign({}, axis.tickfont, { size: 10 });
+                    if (key === 'angularaxis' && !axis.tickvals && axis.type !== 'linear') {
+                        const categories = [...new Set(panel.traces.flatMap(i => Array.isArray(data[i].theta) ? data[i].theta : []))];
+                        if (categories.length && categories.every(value => typeof value === 'string' && !Number.isFinite(Number(value)))) {
+                            const labelWidth = Math.max(40, Math.min(60, plotWidth / 4));
+                            axis.tickmode = 'array';
+                            axis.tickvals = categories;
+                            axis.ticktext = categories.map(value => textWidth(value, 10) > labelWidth
+                                ? value.split(/\s+/).map(word => wrapText(word, 10, labelWidth).text).join('<br>') : value);
+                        }
+                    }
+                    if (key === 'radialaxis' && !axis.tickvals && !axis.dtick) {
+                        axis.nticks = Math.min(number(axis.nticks, 4), 4);
+                    }
                 }
             }
         }
+    }
+
+    function colorbarBands(data, layout, plotWidth) {
+        const bars = [];
+        const shared = new Set();
+        function add(owner) {
+            owner.colorbar = owner.colorbar || {};
+            if (!bars.includes(owner.colorbar)) bars.push(owner.colorbar);
+        }
+        for (const trace of data) {
+            if (trace.visible === false || trace.visible === 'legendonly') continue;
+            for (const owner of [trace, trace.marker]) {
+                if (!owner) continue;
+                if (owner.coloraxis) { shared.add(owner.coloraxis); continue; }
+                if (owner.showscale === false) continue;
+                if (owner.colorbar || owner === trace && ['heatmap', 'contour', 'surface'].includes(trace.type) ||
+                    owner.showscale === true) add(owner);
+            }
+        }
+        for (const ref of shared) {
+            const axis = layout[ref] = layout[ref] || {};
+            if (axis.showscale !== false) add(axis);
+        }
+        return bars.map(bar => {
+            const title = typeof bar.title === 'string' ? { text: bar.title } : bar.title || {};
+            const wrapped = wrapText(title.text, 11, plotWidth - 8);
+            Object.assign(bar, {
+                orientation: 'h', xref: 'paper', yref: 'paper', x: 0.5, xanchor: 'center', yanchor: 'top',
+                lenmode: 'fraction', len: 1, thicknessmode: 'pixels', thickness: 12, xpad: 0, ypad: 0,
+                tickfont: Object.assign({}, bar.tickfont, { size: 10 }),
+                title: Object.assign({}, title, { text: wrapped.text, side: 'top', font: Object.assign({}, title.font, { size: 11 }) })
+            });
+            if (!bar.tickvals && !bar.dtick) bar.nticks = Math.min(number(bar.nticks, 4), 4);
+            return { bar, height: 38 + wrapped.lines * 15 };
+        });
     }
 
     function legendMetrics(data, layout, availableWidth) {
@@ -368,6 +474,18 @@
         return { height: height + rowHeight + 8, rows };
     }
 
+    function axisFootPixels(panel, layout) {
+        let pixels = 8;
+        for (const ref of panel.xaxes) {
+            const axis = layout[axisKey(ref)];
+            if (axis.showticklabels === false) continue;
+            const lines = (axis.ticktext || []).reduce((max, text) => Math.max(max, plainText(text).split('\n').length), 1);
+            const titleHeight = axis.title && axis.title.text ? 22 : 0;
+            pixels = Math.max(pixels, 42 + titleHeight, lines * 13 + 12 + titleHeight);
+        }
+        return pixels;
+    }
+
     function minimumPlotHeight(panels, layout) {
         let pixels = panels.length ? 300 : 300;
         for (const panel of panels) {
@@ -384,13 +502,195 @@
             const headingLines = (layout.annotations || []).filter(a => a.xref === 'paper' && a.yref === 'paper' &&
                 a.showarrow === false && Math.abs(a.y - lower.domain.y[1]) < 0.006)
                 .reduce((max, a) => Math.max(max, plainText(a.text).split('\n').length), 0);
-            const upperTicks = upper.xaxes.some(ref => layout[axisKey(ref)].showticklabels !== false) ? 42 : 8;
+            const upperTicks = axisFootPixels(upper, layout);
             pixels = Math.max(pixels, Math.ceil((upperTicks + headingLines * 18 + 10) / gap));
         }
         return pixels;
     }
 
-    function fitFigure(figure, measuredWidth) {
+    function rgbaColor(value) {
+        if (typeof value !== 'string') return null;
+        const named = { white: '#ffffff', black: '#000000', red: '#ff0000', blue: '#0000ff',
+            green: '#008000', gray: '#808080', grey: '#808080', navy: '#000080',
+            orange: '#ffa500', yellow: '#ffff00', gold: '#ffd700', transparent: '#00000000' };
+        value = named[value.toLowerCase().trim()] || value.trim();
+        const hex = value.match(/^#([\da-f]{3,4}|[\da-f]{6}|[\da-f]{8})$/i);
+        if (hex) {
+            const digits = hex[1].length < 5 ? Array.from(hex[1], digit => digit + digit).join('') : hex[1];
+            return [0, 2, 4].map(i => parseInt(digits.slice(i, i + 2), 16))
+                .concat(digits.length === 8 ? parseInt(digits.slice(6), 16) / 255 : 1);
+        }
+        const rgb = value.match(/^rgba?\(\s*([\d.]+)(%)?\s*,\s*([\d.]+)(%)?\s*,\s*([\d.]+)(%)?(?:\s*,\s*([\d.]+)(%)?)?\s*\)$/i);
+        if (!rgb) return null;
+        return [1, 3, 5].map(i => Math.min(255, Number(rgb[i]) * (rgb[i + 1] ? 2.55 : 1)))
+            .concat(rgb[7] === undefined ? 1 : Math.min(1, Number(rgb[7]) / (rgb[8] ? 100 : 1)));
+    }
+
+    function compositeColor(foreground, background) {
+        return foreground.slice(0, 3).map((value, i) => Math.round(value * foreground[3] + background[i] * (1 - foreground[3])));
+    }
+
+    function luminance(rgb) {
+        const linear = rgb.slice(0, 3).map(value => value / 255 <= 0.04045 ? value / 255 / 12.92 : Math.pow((value / 255 + 0.055) / 1.055, 2.4));
+        return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    }
+
+    function colorContrast(foreground, background) {
+        const fg = luminance(compositeColor(foreground, background));
+        const bg = luminance(background);
+        return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+    }
+
+    function protectDataAnnotations(layout, plotWidth, mobile, warnings) {
+        const template = layout.template && layout.template.layout || {};
+        const paper = compositeColor(rgbaColor(layout.paper_bgcolor || template.paper_bgcolor) || [255, 255, 255, 1], [255, 255, 255]);
+        const plot = compositeColor(rgbaColor(layout.plot_bgcolor || template.plot_bgcolor) || [...paper, 1], paper);
+        for (const annotation of layout.annotations || []) {
+            const xref = annotation.xref || 'x';
+            const yref = annotation.yref || 'y';
+            if (annotation.visible === false || annotation.showarrow !== false ||
+                !/^x\d*(?: domain)?$/.test(xref) && !/^y\d*(?: domain)?$/.test(yref)) continue;
+            const authoredSurface = rgbaColor(annotation.bgcolor);
+            const surface = authoredSurface ? compositeColor(authoredSurface, plot) : plot;
+            // A transparent box leaves text contrast dependent on the curve below it.
+            if (!authoredSurface || authoredSurface[3] < 1) annotation.bgcolor = 'rgb(' + surface.join(', ') + ')';
+            const font = annotation.font = Object.assign({}, annotation.font);
+            const authoredText = rgbaColor(font.color);
+            if (!font.color || authoredText && colorContrast(authoredText, surface) < 4.5) {
+                const neutrals = ['#111827', '#F9FAFB', '#000000', '#FFFFFF'];
+                font.color = neutrals.find(color => colorContrast(rgbaColor(color), surface) >= 4.5);
+            } else if (!authoredText) {
+                warnings.push('图内注释使用未解析的文字颜色；保留原色，对比度需在实际渲染中确认。');
+            }
+            const size = number(font.size, 12);
+            font.size = mobile ? Math.max(12, Math.min(size, 14)) : Math.max(12, size);
+            if (mobile) annotation.text = wrapText(annotation.text, font.size, Math.max(40, plotWidth - 12)).text;
+            annotation.borderpad = Math.max(number(annotation.borderpad, 4), 4);
+            const reference = (layout.shapes || []).find(shape => shape.type === 'line' &&
+                (shape.xref || 'x') === xref && (shape.yref || 'y') === yref &&
+                / domain$/.test(xref) && Number(shape.x0) === 0 && Number(shape.x1) === 1 &&
+                shape.y0 === annotation.y && shape.y1 === annotation.y);
+            if (!annotation.bordercolor || rgbaColor(annotation.bordercolor)?.[3] === 0) {
+                annotation.bordercolor = reference && reference.line && reference.line.color ||
+                    (luminance(surface) > 0.4 ? '#CBD5E1' : '#64748B');
+            }
+            if (annotation.borderwidth === undefined) annotation.borderwidth = 1;
+        }
+    }
+
+    function titleYear(button) {
+        const title = button.args && button.args[1] && button.args[1].title;
+        const text = typeof title === 'string' ? title : title && title.text;
+        const match = text && text.match(/(?:（|\()(\d{4})(?:，|,|）|\))/);
+        return match && match[1];
+    }
+
+    // Scatter attributes whose arrays are indexed by point. Do not slice trace-level
+    // arrays such as colorscale, meta or selectedpoints merely because lengths match.
+    const POINT_PATHS = [
+        'x', 'y', 'ids', 'text', 'hovertext', 'customdata', 'hovertemplate', 'texttemplate', 'textposition',
+        ...['size', 'color', 'opacity', 'symbol', 'angle', 'standoff', 'line.color', 'line.width'].map(key => 'marker.' + key),
+        ...['size', 'color', 'family', 'weight', 'style', 'variant', 'lineposition', 'textcase', 'shadow'].map(key => 'textfont.' + key),
+        ...['x', 'y'].flatMap(axis => ['array', 'arrayminus'].map(key => 'error_' + axis + '.' + key))
+    ];
+
+    function atPath(object, path) {
+        return path.split('.').reduce((value, key) => value && value[key], object);
+    }
+
+    function setPath(object, path, value) {
+        const keys = path.split('.');
+        const last = keys.pop();
+        const parent = keys.reduce((next, key) => next[key] || (next[key] = {}), object);
+        parent[last] = value;
+    }
+
+    function repairYearMenu(data, layout, options, warnings, frames) {
+        if (!data.length || frames && frames.length) return [];
+        const candidates = [];
+        (layout.updatemenus || []).forEach((menu, menuIndex) => {
+            const buttons = menu.buttons || [];
+            const years = buttons.map(titleYear);
+            // Existing data commands, toggle buttons and app-managed commands are authoritative.
+            if (menu.visible === false || menu.templateitemname || buttons.length < 2 ||
+                years.some(year => !year) || new Set(years).size !== years.length ||
+                buttons.some((button, i) => button.visible === false || button.templateitemname ||
+                    button.method !== 'update' || button.execute === false || button.args2 ||
+                    button.label && button.label !== years[i] || button.args.length !== 2 ||
+                    !button.args[0] || typeof button.args[0] !== 'object' || Array.isArray(button.args[0]) ||
+                    Object.keys(button.args[0] || {}).some(key => key !== 'visible') ||
+                    Object.keys(button.args[1] || {}).some(key => key !== 'title') ||
+                    !Array.isArray(button.args[0].visible) || button.args[0].visible.length !== data.length ||
+                    button.args[0].visible.some(value => value !== true))) return;
+            const yearSet = new Set(years);
+            const bindings = data.map(trace => {
+                if ((trace.type || 'scatter') !== 'scatter' || trace.transforms || trace.selectedpoints !== undefined ||
+                    !Array.isArray(trace.x) || !Array.isArray(trace.y) || trace.x.length !== trace.y.length ||
+                    !Array.isArray(trace.customdata) || trace.customdata.length !== trace.x.length ||
+                    !trace.customdata.length || !trace.customdata.every(Array.isArray)) return null;
+                const paths = POINT_PATHS.filter(path => Array.isArray(atPath(trace, path)));
+                if (paths.some(path => atPath(trace, path).length !== trace.x.length)) return null;
+                const columns = trace.customdata[0].map((_, column) => column).filter(column => {
+                    const values = trace.customdata.map(row => String(row[column]));
+                    return values.every(year => yearSet.has(year)) && new Set(values).size === years.length &&
+                        values.every((year, i) => {
+                            const evidence = [trace.hovertext, trace.text].filter(Array.isArray)
+                                .flatMap(array => plainText(array[i]).match(/\b(?:19|20)\d{2}\b/g) || [])
+                                .filter(value => yearSet.has(value));
+                            return evidence.length > 0 && evidence.every(value => value === year);
+                        });
+                });
+                return columns.length === 1 ? { column: columns[0], paths } : null;
+            });
+            if (bindings.every(Boolean)) candidates.push({ menu, menuIndex, years, bindings });
+        });
+        // Two independent filters of the same full point arrays require explicit composition.
+        if (candidates.length !== 1) return [];
+        const { menu, menuIndex, years, bindings } = candidates[0];
+        const values = ['all', ...years];
+        const paths = [...new Set(bindings.flatMap(binding => binding.paths))];
+        function payload(value) {
+            const update = {};
+            for (const path of paths) {
+                update[path] = data.map((trace, i) => {
+                    const array = atPath(trace, path);
+                    if (!Array.isArray(array)) return undefined; // Plotly skips this trace for the attribute.
+                    return array.filter((_, j) => value === 'all' || String(trace.customdata[j][bindings[i].column]) === value);
+                });
+            }
+            return update;
+        }
+        const fullTitle = normalizeValue(layout.title);
+        menu.buttons = [
+            { label: 'all', method: 'update', args: [{ visible: data.map(() => true) }, { title: fullTitle }] },
+            ...menu.buttons
+        ].map((button, i) => Object.assign({}, button, {
+            label: values[i], name: 'responsive-year-' + menuIndex + ':' + values[i],
+            args: [Object.assign({}, button.args[0], payload(values[i])), button.args[1]]
+        }));
+        const requested = options.yearSelections && String(options.yearSelections[menuIndex]);
+        menu.active = Math.max(0, values.indexOf(requested));
+        menu.showactive = true;
+        // Keep this repaired filter a dropdown at every width. Plotly 4.1.1 can
+        // retain the old SVG header when react changes a menu's type to buttons.
+        menu.type = 'dropdown';
+        menu.direction = 'up';
+        const selected = menu.buttons[menu.active];
+        if (menu.active) {
+            // Apply the same point mask to all per-point arrays, keeping missing numeric values intact.
+            for (const path of paths) data.forEach((trace, i) => {
+                const array = selected.args[0][path][i];
+                if (array !== undefined) setPath(trace, path, array);
+            });
+            const selectedTitle = selected.args[1].title;
+            layout.title = Object.assign({}, typeof fullTitle === 'string' ? { text: fullTitle } : fullTitle,
+                typeof selectedTitle === 'string' ? { text: selectedTitle } : normalizeValue(selectedTitle));
+        }
+        warnings.push('年份按钮缺少数据筛选参数；已由逐点年份元数据与文字确认绑定，默认 all 显示全部年份。');
+        return [{ menuIndex, values, buttonNames: menu.buttons.map(button => button.name) }];
+    }
+
+    function fitFigure(figure, measuredWidth, options = {}) {
         const width = Math.max(1, Math.floor(number(measuredWidth, 360)));
         const mobile = width < MOBILE_WIDTH;
         const data = normalizeValue(Array.isArray(figure.data) ? figure.data : []);
@@ -398,6 +698,7 @@
         const layout = normalizeValue(sourceLayout);
         const config = Object.assign({}, figure.config || {}, { responsive: true });
         const warnings = [];
+        const yearMenus = repairYearMenu(data, layout, options, warnings, figure.frames);
         delete layout.width;
         layout.autosize = true;
         if (layout.uirevision === undefined) layout.uirevision = 'responsive-layout';
@@ -411,20 +712,29 @@
             t: number(sourceMargin.t, 70), b: number(sourceMargin.b, 50)
         });
         const plotWidth = Math.max(40, width - margin.l - margin.r);
+        protectDataAnnotations(layout, plotWidth, mobile, warnings);
         const title = typeof layout.title === 'string' ? { text: layout.title } : layout.title || {};
         const titleSize = mobile ? Math.min(number(title.font && title.font.size, 16), 16) : number(title.font && title.font.size, 18);
         const wrappedTitle = wrapText(title.text, titleSize, Math.max(40, width - 28));
+        // Native menu clicks do not refit the figure; reserve the longest title up front.
+        const titleLines = Math.max(wrappedTitle.lines, ...yearMenus.flatMap(item =>
+            layout.updatemenus[item.menuIndex].buttons.map(button => {
+                const value = button.args[1].title;
+                return wrapText(typeof value === 'string' ? value : value && value.text, titleSize, Math.max(40, width - 28)).lines;
+            })));
         if (title.text) {
             title.text = wrappedTitle.text;
             title.font = Object.assign({}, title.font, { size: titleSize });
-            title.automargin = true;
+            // We reserve the multiline title region ourselves on mobile. Plotly's
+            // title automargin fallback can shift all tspans above the SVG edge.
+            title.automargin = !mobile;
             if (mobile) Object.assign(title, { xref: 'container', yref: 'container', x: 0.025, y: 0.99, xanchor: 'left', yanchor: 'top', pad: { t: 0 } });
             layout.title = title;
         }
         let stacked = false;
         if (mobile) {
             stacked = stackPanels(data, layout, panels, plotWidth);
-            fitAxes(data, layout, panels, plotWidth);
+            fitAxes(data, layout, panels, plotWidth, warnings);
             config.displayModeBar = false;
             layout.font = Object.assign({}, layout.font, { size: Math.min(number(layout.font && layout.font.size, 12), 12) });
             layout.uniformtext = Object.assign({}, layout.uniformtext, { minsize: 10, mode: 'hide' });
@@ -441,6 +751,17 @@
                 if (trace.type === 'bar') {
                     trace.textfont = Object.assign({}, trace.textfont, { size: Math.min(number(trace.textfont && trace.textfont.size, 11), 11) });
                     trace.cliponaxis = false;
+                }
+                if (trace.type === 'scatter' || trace.type === 'scatterpolar') trace.cliponaxis = false;
+                if (trace.type === 'heatmap' && typeof trace.texttemplate === 'string') {
+                    const columnCount = Array.isArray(trace.z && trace.z[0]) ? trace.z[0].length : 1;
+                    // Axis names are already shown on the axes; retain the numeric
+                    // template and unit when repeated axis labels crowd narrow cells.
+                    if (plotWidth / columnCount < 120) {
+                        const compact = trace.texttemplate.split(/<br\s*\/?>/i).filter(line => !/%\{[xy](?:[:}]|\|)/.test(line)).join('<br>');
+                        if (compact.includes('%{z')) trace.texttemplate = compact;
+                    }
+                    trace.textfont = Object.assign({}, trace.textfont, { size: Math.min(number(trace.textfont && trace.textfont.size, 11), 11) });
                 }
                 if (trace.type === 'sankey' && trace.node && Array.isArray(trace.node.label)) {
                     const limit = width < 360 ? 5 : width < 440 ? 6 : 8;
@@ -474,21 +795,34 @@
                     if (annotation.y > 0.98) topLines = Math.max(topLines, wrapped.lines);
                 }
             }
-            margin.t = Math.max(16 + wrappedTitle.lines * (titleSize + 5) + topLines * 18 + (topLines ? 14 : 0), Math.min(margin.t, 150));
+            margin.t = Math.max(Math.ceil(32 + titleLines * titleSize * 1.3 + topLines * 18 + (topLines ? 14 : 0)), Math.min(margin.t, 150));
         }
         const legend = mobile ? legendMetrics(data, layout, plotWidth) : { height: 0, rows: 0 };
+        const colorbars = mobile ? colorbarBands(data, layout, plotWidth) : [];
+        const colorbarHeight = colorbars.reduce((sum, item) => sum + item.height, 0);
         const bottomPanels = panels.filter(panel => panel.domain.y[0] < 0.001);
         const hasBottomAxis = bottomPanels.some(panel => panel.kind === 'cartesian');
         const bottomTitle = bottomPanels.some(panel => panel.xaxes.some(ref => layout[axisKey(ref)].title && layout[axisKey(ref)].title.text));
-        const axisFoot = hasBottomAxis ? bottomTitle ? 72 : 52 : 12;
+        const axisFoot = hasBottomAxis
+            ? Math.max(bottomTitle ? 72 : 52, ...bottomPanels.map(panel => axisFootPixels(panel, layout))) : 12;
         const footerHeight = footers.reduce((sum, item) => sum + item.height, 0);
-        const menus = mobile ? (layout.updatemenus || []).filter(menu => menu.visible !== false) : [];
+        const menus = (layout.updatemenus || []).filter(menu => menu.visible !== false);
         const sliders = mobile ? (layout.sliders || []).filter(slider => slider.visible !== false) : [];
-        const controlsHeight = menus.length * 42 + sliders.length * 68;
-        if (mobile) margin.b = Math.max(margin.b, axisFoot + legend.height + footerHeight + controlsHeight + 12);
+        const controlsHeight = mobile ? menus.length * 42 + sliders.length * 68 : 0;
+        if (mobile) margin.b = Math.max(margin.b, axisFoot + legend.height + colorbarHeight + footerHeight + controlsHeight + 12);
         const baseHeight = number(sourceLayout.height, 520);
         const height = Math.max(400, mobile ? Math.max(baseHeight, margin.t + margin.b + minimumPlotHeight(panels, layout)) : baseHeight);
         const plotHeight = height - margin.t - margin.b;
+        if (title.text && !mobile && title.y === undefined && title.yref !== 'paper' &&
+            (!title.yanchor || title.yanchor === 'auto' || title.yanchor === 'top')) {
+            Object.assign(title, { yref: 'container', yanchor: 'top', y: 1 });
+        }
+        // Plotly's multiline tspans use y as a baseline, unlike single-line titles.
+        // Keep that baseline below the SVG edge in pixels, independent of chart height.
+        if (title.text && (mobile || title.yanchor === 'top' && title.yref !== 'paper' && number(title.y, 1) >= 0.9)) {
+            title.yref = 'container';
+            title.y = Math.min(number(title.y, 1), 1 - (titleSize + 8) / height);
+        }
         if (mobile && legend.height) {
             layout.legend = Object.assign({}, layout.legend, {
                 orientation: 'h', xref: 'paper', yref: 'paper', x: 0, xanchor: 'left',
@@ -497,12 +831,17 @@
                 tracegroupgap: 0
             });
         }
-        let footerOffset = axisFoot + legend.height + 8;
+        let colorbarOffset = axisFoot + legend.height + 8;
+        for (const item of colorbars) {
+            item.bar.y = -colorbarOffset / plotHeight;
+            colorbarOffset += item.height;
+        }
+        let footerOffset = axisFoot + legend.height + colorbarHeight + 8;
         for (const item of footers) {
             Object.assign(item.annotation, { y: 0, yanchor: 'top', yshift: -footerOffset });
             footerOffset += item.height;
         }
-        let controlOffset = axisFoot + legend.height + footerHeight + 8;
+        let controlOffset = axisFoot + legend.height + colorbarHeight + footerHeight + 8;
         for (const menu of menus) {
             for (const button of menu.buttons || []) {
                 if (!button.label) {
@@ -516,11 +855,20 @@
                     const original = button.args[1].title;
                     const updateTitle = typeof original === 'string' ? { text: original } : original;
                     button.args[1].title = Object.assign({}, title, updateTitle, { text: wrapText(updateTitle.text, titleSize, width - 28).text });
+                    if (mobile) {
+                        for (const key of ['xref', 'yref', 'x', 'y', 'xanchor', 'yanchor', 'pad', 'automargin', 'font']) {
+                            button.args[1].title[key] = normalizeValue(title[key]);
+                        }
+                    } else if (button.args[1].title.yanchor === 'top' && button.args[1].title.yref !== 'paper' &&
+                        number(button.args[1].title.y, 1) >= 0.9) {
+                        button.args[1].title.y = Math.min(number(button.args[1].title.y, 1), 1 - (titleSize + 8) / height);
+                    }
                 }
             }
+            if (!mobile) continue;
             const buttonWidth = (menu.buttons || []).reduce((sum, button) => sum + textWidth(String(button.label), 11) + 28, 0);
             if (menu.type === 'buttons' && buttonWidth > plotWidth) menu.type = 'dropdown';
-            Object.assign(menu, { x: 0, xanchor: 'left', y: -controlOffset / plotHeight, yanchor: 'top', direction: menu.type === 'dropdown' ? 'down' : 'right' });
+            Object.assign(menu, { x: 0, xanchor: 'left', y: -controlOffset / plotHeight, yanchor: 'top', direction: menu.type === 'dropdown' ? 'up' : 'right' });
             menu.font = Object.assign({}, menu.font, { size: 11 });
             controlOffset += 42;
         }
@@ -529,17 +877,130 @@
             controlOffset += 68;
         }
         layout.height = height;
-        return { data, layout, config, height, panels, stacked, warnings: [...new Set(warnings)] };
+        return { data, layout, config, height, panels, stacked, yearMenus, warnings: [...new Set(warnings)] };
     }
 
     function overlaps(a, b) {
         return a.left < b.right + 1 && a.right + 1 > b.left && a.top < b.bottom + 1 && a.bottom + 1 > b.top;
     }
 
+    // measure must use the rendered font; cell area alone cannot establish readability.
+    function fitCellText(value, width, height, measure, options = {}) {
+        const fontSize = Math.max(10, number(options.fontSize, 10));
+        const padding = number(options.padding, 2);
+        const lineHeight = fontSize * 1.2;
+        const result = { lines: [], status: 'hidden', fontSize, padding, lineHeight };
+        const innerWidth = width - padding * 2;
+        const maxLines = Math.floor((height - padding * 2) / lineHeight + 0.00001);
+        if (width < number(options.minWidth, 24) || height < number(options.minHeight, 18) ||
+            !maxLines || innerWidth <= 0 || typeof measure !== 'function' || !value) return result;
+        const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+        const graphemes = text => segmenter ? Array.from(segmenter.segment(text), item => item.segment) : Array.from(text);
+        const lines = [];
+        for (const paragraph of String(value).split(/\r?\n/)) {
+            let chars = graphemes(paragraph.trim());
+            if (!chars.length) { lines.push(''); continue; }
+            while (chars.length) {
+                let count = 0;
+                while (count < chars.length && measure(chars.slice(0, count + 1).join('')) <= innerWidth + 0.001) count++;
+                if (!count) return result;
+                if (count < chars.length && !/\s/.test(chars[count])) {
+                    const space = chars.slice(0, count).lastIndexOf(' ');
+                    if (space > 0) count = space;
+                }
+                lines.push(chars.splice(0, count).join('').trimEnd());
+                while (chars.length && /\s/.test(chars[0])) chars.shift();
+            }
+        }
+        if (lines.length <= maxLines) return Object.assign(result, { lines, status: lines.length > 1 ? 'wrapped' : 'full' });
+        const kept = lines.slice(0, maxLines);
+        const tail = graphemes(kept[maxLines - 1]);
+        while (tail.length && measure(tail.join('') + '…') > innerWidth + 0.001) tail.pop();
+        if (measure(tail.join('') + '…') > innerWidth + 0.001 || !tail.length && kept.length === 1) return result;
+        kept[maxLines - 1] = tail.join('').trimEnd() + '…';
+        return Object.assign(result, { lines: kept, status: 'ellipsis' });
+    }
+
+    function fitTreemapLabels(gd) {
+        if (!gd.ownerDocument || !gd.ownerDocument.createElementNS) return;
+        const entries = Array.from(gd.querySelectorAll('.treemaplayer .slice')).map(slice => {
+            const surface = slice.querySelector('path.surface');
+            const text = slice.querySelector('text.slicetext');
+            return surface ? { slice, surface, text, rect: surface.getBoundingClientRect() } : null;
+        }).filter(Boolean);
+        for (const entry of entries) {
+            const { surface, text, rect, slice } = entry;
+            if (!text) continue;
+            const source = text.getAttribute('data-unformatted');
+            // Preserve rich formatting/math and explicitly disabled labels. Never change
+            // labels/ids/hovertemplate: the SVG display is regenerated from its complete text.
+            if (!source || /<(?!(?:br\s*\/?>))[^>]*>|\$/.test(source)) continue;
+            const box = surface.getBBox();
+            if (!box.width || !box.height || !rect.width || !rect.height) continue;
+            const scaleX = rect.width / box.width, scaleY = rect.height / box.height;
+            const children = entries.filter(other => other !== entry && other.slice.parentElement === slice.parentElement &&
+                other.rect.left >= rect.left - 0.1 && other.rect.right <= rect.right + 0.1 &&
+                other.rect.top > rect.top + 1 && other.rect.bottom <= rect.bottom + 0.1);
+            // Branch labels belong to their header strip, never to the children's area.
+            const availableHeight = children.length ? Math.min(...children.map(child => child.rect.top - rect.top)) - 1 : rect.height;
+            text.setAttribute('data-responsive-height', String(availableHeight));
+            const view = gd.ownerDocument.defaultView;
+            const preferred = Math.max(10, parseFloat(view.getComputedStyle(text).fontSize) * scaleY || 12);
+            const probe = text.cloneNode(false);
+            probe.removeAttribute('transform');
+            probe.style.display = '';
+            probe.style.visibility = 'hidden';
+            text.parentElement.appendChild(probe);
+            let fitted;
+            for (const fontSize of [...new Set([preferred, 10])]) {
+                probe.style.fontSize = fontSize / scaleY + 'px';
+                const measure = value => { probe.textContent = value; return probe.getComputedTextLength() * scaleX; };
+                fitted = fitCellText(plainText(source), rect.width, availableHeight, measure, { fontSize });
+                if (fitted.status === 'full' || fitted.status === 'wrapped') break;
+            }
+            probe.remove();
+            text.setAttribute('data-responsive-label', fitted.status);
+            if (fitted.status === 'hidden') { text.style.display = 'none'; continue; }
+            const oldTransform = text.getAttribute('transform') || '';
+            if (oldTransform !== text.getAttribute('data-responsive-transform')) {
+                const match = oldTransform.match(/translate\([^,\s]+[,\s]+([^\s,)]+)/);
+                const relativeY = match ? (Number(match[1]) - box.y) / box.height : 0;
+                text.setAttribute('data-responsive-valign', relativeY > 0.75 ? 'bottom' : relativeY > 0.3 ? 'middle' : 'top');
+            }
+            const anchor = text.getAttribute('text-anchor');
+            const x = anchor === 'middle' ? box.x + box.width / 2 : anchor === 'end' ? box.x + box.width - fitted.padding / scaleX : box.x + fitted.padding / scaleX;
+            const blockHeight = fitted.lines.length * fitted.lineHeight;
+            const valign = children.length ? 'top' : text.getAttribute('data-responsive-valign');
+            const offsetY = valign === 'bottom' ? availableHeight - blockHeight - fitted.padding : valign === 'middle' ? (availableHeight - blockHeight) / 2 : fitted.padding;
+            text.style.display = '';
+            text.style.fontSize = fitted.fontSize / scaleY + 'px';
+            text.replaceChildren();
+            for (const [index, line] of fitted.lines.entries()) {
+                const span = gd.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+                span.setAttribute('x', '0');
+                span.setAttribute('y', String(index * fitted.lineHeight / scaleY));
+                span.textContent = line;
+                text.appendChild(span);
+            }
+            text.removeAttribute('transform');
+            const glyphs = text.getBBox();
+            const transform = 'translate(' + x + ',' + (box.y + offsetY / scaleY - glyphs.y) + ')';
+            text.setAttribute('transform', transform);
+            text.setAttribute('data-responsive-transform', transform);
+            const actual = text.getBoundingClientRect();
+            if (actual.left < rect.left + 0.5 || actual.right > rect.right - 0.5 ||
+                actual.top < rect.top + 0.5 || actual.bottom > rect.top + availableHeight - 0.5) {
+                text.style.display = 'none';
+                text.setAttribute('data-responsive-label', 'hidden');
+            }
+        }
+    }
+
     function resolveTextCollisions(gd) {
         if (!gd || typeof gd.querySelectorAll !== 'function') return 0;
+        fitTreemapLabels(gd);
         const bounds = gd.getBoundingClientRect();
-        const obstacles = Array.from(gd.querySelectorAll('.gtitle, .annotation-text, g[class$="tick"] text, g[class^="g-"][class$="title"] text'))
+        const obstacles = Array.from(gd.querySelectorAll('.gtitle, .annotation-text, .annotation rect.bg, g[class$="tick"] text, g[class^="g-"][class$="title"] text'))
             .map(node => node.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
         const accepted = [];
         let hidden = 0;
@@ -559,5 +1020,5 @@
         return hidden;
     }
 
-    return { fitFigure, wrapText, normalizeValue, resolveTextCollisions };
+    return { fitFigure, wrapText, normalizeValue, resolveTextCollisions, fitCellText, fitTreemapLabels };
 });

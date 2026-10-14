@@ -1,2 +1,32 @@
-mocks
-.workbuddy
+# Publish only the reusable skill and its public documentation.
+# Local demos, fixtures, reports, dependencies and workspace settings stay local.
+/*
+!/.gitignore
+!/README.md
+!/AGENTS.md
+!/LICENSE
+!/LICENSE.*
+!/skills/
+
+# Keep this skill; other local skills are excluded by default.
+/skills/*
+!/skills/plotly-responsive/
+
+# Keep only the two images used by README, not the full docs/report archive.
+!/docs/
+/docs/*
+!/docs/images/
+/docs/images/*
+!/docs/images/mobile-360px.jpg
+!/docs/images/mobile-480px.jpg
+
+# Generated files and local secrets inside otherwise included directories.
+**/node_modules/
+**/__pycache__/
+**/.cache/
+.env
+.env.*
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
