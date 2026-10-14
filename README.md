@@ -15,17 +15,32 @@
 | 移动端常见问题 | 适配效果 |
 | --- | --- |
 | 并排子图各占半屏，图形和标题拥挤 | 按原行列顺序纵向排列，子图标题跟随所属面板移动，增加图表高度 |
-| 长中文标题、副标题超出边界 | 自动换行并预留完整行高，保留 `<b>`、`<sup>` 等富文本 |
+| 长中文标题、副标题超出边界 | 默认提取到 SVG 外的 HTML 标题区，自然换行，保留支持的富文本 |
 | 分类刻度密集、长标签互相覆盖 | 换行并显示有代表性的刻度，保留首尾，原始类别和数据仍保留 |
-| 图例、脚注、按钮挤在一起 | 按各自需要的空间分配底部区域；下拉菜单向上展开 |
+| 图例、脚注、按钮挤在一起 | 默认图例置顶并独立预算；脚注、色条、按钮在底部分区，下拉菜单向上展开 |
 | 竖向色条挤占绘图区 | 窄屏改为横向色条，单独预留标题、刻度和高度 |
 | 折线穿过均值等标注，文字难读 | 为适用的数据坐标标注增加实色底、小内边距和可读前景色，保留参考坐标 |
 | 散点或柱形数据标签重叠、被裁切 | 渲染后按真实 SVG 边界检查，可隐藏拥挤的可选标签，数据与 hover 保留 |
 | 手机横竖屏切换、卡片宽度变化 | 使用 `ResizeObserver` 从完整源配置重新适配，宽屏恢复对应布局 |
 
+### 主标题与图例的布局规则
+
+**默认采用「外置主标题 + 顶部图例」。** `layout.title.text` 及 `layout.title.subtitle` 提取到 SVG 外层的 HTML 标题区；标题按容器宽度自然换行，页面只显示一次主标题。图例保留 Plotly 原生的点击隐藏/恢复交互，在 SVG 顶部按实际条目数量、长度和行数独立留位。子图标题、坐标轴标题、均值等数据标注保留各自含义和图内位置。
+
+| 使用方式 | 窄容器（小于 560px） | 大尺寸容器 |
+| --- | --- | --- |
+| 默认 / `titlePlacement: 'external'` | HTML 主标题自然换行，图例始终在顶部；根据需要增加 SVG 高度 | 同样使用外置标题和顶部图例，保留原有子图排列 |
+| 显式 `titlePlacement: 'internal'` | 主标题留在 SVG；短标题与少量图例可一起放顶部。多行标题或顶部预算拥挤时，才考虑底部图例 | 保留作者的图例布局，不因移动端规则强行移到底部；内置顶部标题仍保护基线 |
+
+宽度判断以 **图表容器实际宽度** 为准；360px 视口中的卡片可用宽度可能仅约 311px。大屏中的窄侧栏仍按窄容器处理。外置标题不再占用 SVG 的主标题边距，图例、子图标题和绘图区各自留位，避免仅缩小字号。
+
+接入时必须渲染返回的 `header`，否则默认模式的主标题不会出现。`renderHeader` 使用受控的文字格式子集（如 `<b>`、`<sup>`、`<br>` 和文字样式 `span`），清除事件属性及活动内容；复杂 HTML、链接和 MathJax 主标题需由业务组件单独支持。年份/普通菜单通过 `titleUpdates` 同步外置标题，后续 resize 继续保存当前选择，详见 [接入说明](skills/plotly-responsive/references/integration.md)。
+
+**图片导出：** `Plotly.toImage` 只导出图表本身，外置 HTML 标题不会自动进入图片。需要标题时，在独立导出容器中从完整源配置重新调用 `fitFigure(source, exportWidth, { titlePlacement: 'internal', yearSelections })`，渲染后导出；或由产品将 HTML 标题与图表合成。不要修改正在展示的原始 figure。
+
 ### 实际渲染截图
 
-下面是同一份双子图输入在两个视口下的截图：窄屏纵向排列两个面板，标题随宽度换行；360px 下部分可选标签隐藏，480px 下更多标签可见。
+下面是同一份双子图输入在两个视口下的截图：窄屏纵向排列两个面板，主标题在 SVG 外显示一次，图例位于顶部；360px 下部分可选标签隐藏，480px 下更多标签可见。
 
 <table>
   <tr><th>360px 视口</th><th>480px 视口</th></tr>
@@ -71,10 +86,14 @@ Skill 的作用是指导接入、排查和验证；页面运行时需要实际�
 <script src="./plotly-4.1.1.min.js"></script>
 <script src="./skills/plotly-responsive/assets/plotly-responsive.js"></script>
 
-<div id="chart" style="width: 100%; min-width: 0;"></div>
+<section style="min-width: 0;">
+  <div id="chartHeader" style="margin-bottom: 8px;"></div>
+  <div id="chart" style="width: 100%; min-width: 0;"></div>
+</section>
 
 <script>
   const container = document.getElementById('chart');
+  const headerElement = document.getElementById('chartHeader');
   const source = PlotlyResponsive.normalizeValue({
     data: [{
       type: 'bar',
@@ -91,7 +110,8 @@ Skill 的作用是指导接入、排查和验证；页面运行时需要实际�
   async function render() {
     const width = container.getBoundingClientRect().width;
     if (width <= 0) return;
-    const fitted = PlotlyResponsive.fitFigure(source, width);
+    const fitted = PlotlyResponsive.fitFigure(source, width); // 默认外置主标题
+    PlotlyResponsive.renderHeader(headerElement, fitted.header);
     container.style.height = fitted.height + 'px';
     await Plotly.newPlot(container, fitted.data, fitted.layout, fitted.config);
     await new Promise(resolve => requestAnimationFrame(resolve));
@@ -121,18 +141,19 @@ React、Vue 等项目可以把这些步骤放入对应的挂载、更新和卸�
 浏览器中使用 `window.PlotlyResponsive`；CommonJS 中使用：
 
 ```js
-const { fitFigure, normalizeValue, wrapText, resolveTextCollisions } =
+const { fitFigure, renderHeader, normalizeValue, wrapText, resolveTextCollisions } =
   require('./skills/plotly-responsive/assets/plotly-responsive.js');
 ```
 
 | API | 用途 |
 | --- | --- |
-| `fitFigure(figure, width, options?)` | 根据容器宽度生成适配结果，不修改传入对象；`options.yearSelections` 可保存补齐年份菜单的选择 |
+| `fitFigure(figure, width, options?)` | 根据容器宽度生成适配结果，不修改传入对象；支持 `options.titlePlacement` 与 `options.yearSelections` |
+| `renderHeader(element, header)` | 将返回的外置标题渲染到图表前的 HTML 容器；内置模式传入 `null` 时清空并隐藏 |
 | `normalizeValue(value)` | 将 TypedArray 和 Plotly `{ dtype, bdata, shape }` 编码转换为普通数组；无效编码显式报错 |
 | `wrapText(text, fontSize, maxWidth)` | 根据宽度估算换行，保留支持的富文本标记；返回 `{ text, lines }` |
 | `resolveTextCollisions(container)` | 在浏览器渲染后检查 SVG 数据标签，隐藏碰撞或越界的可选标签，返回隐藏数量 |
 
-`fitFigure` 返回 `{ data, layout, config, height, panels, stacked, yearMenus, warnings }`。向 Plotly 传入其中的 `data`、`layout`、`config`；`height` 用于容器尺寸，其余字段用于检查面板布局、菜单和诊断。
+`fitFigure` 返回 `{ data, layout, config, height, header, titleUpdates, legendPlacement, panels, stacked, yearMenus, warnings }`。仅将 `data`、`layout`、`config` 传给 Plotly；`height` 为 SVG 容器高度，不包括外置标题。`header` 用于 `renderHeader`，内置模式为 `null`；`titleUpdates` 保存按钮标题更新，`legendPlacement` 为 `top` / `bottom` / `preserve`（无图例调整或宽屏内置模式）。
 
 ## 本地开发与验证
 
@@ -171,14 +192,15 @@ node tests/responsive.test.js
 
 测试使用 Node.js 内置测试模块，无需安装测试依赖。本仓库在 Node.js 22.22.0 下验证。测试会自动发现 `mocks/mock*.js`，但部分专项测试还依赖特定样例，因此仅添加一个演示文件不能运行完整套件。
 
-截至 2026-10-14，本地完整 fixtures 的规则回归为 **48/48 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选和标注可读性等约束。
+截至 2026-10-14，本地完整 fixtures 的规则回归为 **55/55 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字及两种标题/图例模式等约束。
 
 ### 移动端视觉验收
 
 规则测试之外，还需用浏览器检查 **360px、480px** 下的实际效果，并检查窄屏与宽屏之间的切换、数据更新和控件点击。
 
 - 等待所有图表及标签检查完成，保存完整页面截图。
-- 检查标题、图例、坐标轴、色条、控件和数据标签的边界及相交情况。
+- 检查外置标题完整且只显示一次，位于 SVG 上方、卡片内部；图例、子图标题、坐标轴、色条、控件和数据标签没有遮挡。
+- 显式内置模式同时检查窄屏拥挤时的底部图例和大尺寸下保留原布局。
 - 检查图形确实存在，包括层级图是否空白、稀疏日期柱形是否可见，以及 SVG 裁切。
 - 对适用的数据坐标标注检查实色底、文字包围关系和至少 4.5:1 的实际文字对比度。
 
@@ -191,7 +213,7 @@ node tests/write-responsive-report.js reports/responsive-YYYY-MM-DD
 ## 适用范围与边界
 
 - 已有样例覆盖柱形、折线/散点、饼图、极坐标、热力图、Sankey 和层级图，以及多子图组合；其他图型和自定义布局需要新增真实输入验证。
-- 碰撞检查目前针对 SVG 的 scatter/polar/bar 数据标签；Canvas/WebGL 文字和自定义扩展需要单独验证。
+- 碰撞检查针对 SVG 的 scatter/polar/bar 数据标签；treemap 另按真实方块宽高换行或省略。Canvas/WebGL 文字和自定义扩展需要单独验证。
 - 窄屏会隐藏覆盖式 mode bar；需要导出图片等功能时，可由产品界面提供入口。
 - 层级结构和缺少年份参数的菜单，仅在有足够证据时修复；结构派生和稀疏日期轴的语义变化通过 `warnings` 报告，不推测业务数据。
 - 明暗主题有标注规则测试；自定义内联文字颜色、整体透明度，以及标注底框遮挡关键走势等情况，仍需实际视觉审阅。

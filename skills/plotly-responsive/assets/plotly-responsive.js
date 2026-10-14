@@ -435,21 +435,21 @@
         });
     }
 
-    function legendMetrics(data, layout, availableWidth) {
+    function legendMetrics(data, layout, availableWidth, fontSize = 11) {
         if (layout.showlegend === false || (layout.legend && layout.legend.visible === false)) return { height: 0, rows: 0 };
         const entries = [];
         for (const [i, trace] of data.entries()) {
             if (trace.showlegend === false || trace.visible === false) continue;
             if (['pie', 'funnelarea'].includes(trace.type) && Array.isArray(trace.labels)) {
                 const originalLabels = trace.labels.slice();
-                trace.labels = trace.labels.map(label => wrapText(String(label), 11, Math.max(70, availableWidth - 54)).text);
+                trace.labels = trace.labels.map(label => wrapText(String(label), fontSize, Math.max(70, availableWidth - 54)).text);
                 entries.push(...trace.labels);
                 if (!trace.hovertemplate && !trace.hovertext) {
                     trace.hovertext = originalLabels;
                     trace.hovertemplate = '%{hovertext}<br>%{value}<br>%{percent}<extra></extra>';
                 }
             } else if (!DOMAIN_TYPES.has(trace.type) && (trace.name || trace.showlegend === true || data.length > 1)) {
-                trace.name = wrapText(String(trace.name || 'trace ' + i), 11, Math.max(70, availableWidth - 54)).text;
+                trace.name = wrapText(String(trace.name || 'trace ' + i), fontSize, Math.max(70, availableWidth - 54)).text;
                 entries.push(trace.name);
             }
         }
@@ -460,8 +460,8 @@
         let rows = 1;
         for (const text of entries) {
             const lines = plainText(text).split('\n');
-            const itemWidth = Math.min(availableWidth, Math.max(...lines.map(line => textWidth(line, 11))) + 54);
-            const itemHeight = lines.length * 16 + 8;
+            const itemWidth = Math.min(availableWidth, Math.max(...lines.map(line => textWidth(line, fontSize))) + 54);
+            const itemHeight = lines.length * (fontSize + 5) + 8;
             if (used && used + itemWidth > availableWidth) {
                 height += rowHeight;
                 rows++;
@@ -690,9 +690,88 @@
         return [{ menuIndex, values, buttonNames: menu.buttons.map(button => button.name) }];
     }
 
+    function headerFromTitle(value, layout, mobile) {
+        const title = typeof value === 'string' ? { text: value } : normalizeValue(value || {});
+        const size = number(title.font && title.font.size, mobile ? 16 : 18);
+        title.font = Object.assign({}, layout.font, title.font);
+        title.font.size = mobile ? Math.min(size, 16) : size;
+        return title;
+    }
+
+    // Keep only Plotly's text formatting subset; model HTML is never inserted directly.
+    function renderHeader(element, header) {
+        element.replaceChildren();
+        element.hidden = !header || !header.text && !(header.subtitle && header.subtitle.text);
+        if (element.hidden) return;
+        const doc = element.ownerDocument;
+        element.style.overflowWrap = 'anywhere';
+        element.style.minWidth = '0';
+        function appendText(value, target) {
+            const template = doc.createElement('template');
+            template.innerHTML = String(value || '');
+            function copy(node, parent) {
+                if (node.nodeType === 3) { parent.appendChild(doc.createTextNode(node.textContent)); return; }
+                if (node.nodeType !== 1 || ['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT'].includes(node.tagName)) return;
+                let next = parent;
+                if (['B', 'STRONG', 'I', 'EM', 'U', 'S', 'SUP', 'SUB', 'BR', 'SPAN'].includes(node.tagName)) {
+                    next = doc.createElement(node.tagName.toLowerCase());
+                    if (node.tagName === 'SPAN') {
+                        for (const property of ['color', 'font-size', 'font-weight', 'font-style', 'text-decoration']) {
+                            const value = node.style.getPropertyValue(property);
+                            if (value && !/url\s*\(|expression|var\s*\(/i.test(value)) next.style.setProperty(property, value);
+                        }
+                    }
+                    parent.appendChild(next);
+                }
+                for (const child of node.childNodes) copy(child, next);
+            }
+            for (const child of template.content.childNodes) copy(child, target);
+        }
+        for (const [index, item] of [header, header.subtitle || {}].entries()) {
+            if (!item.text) continue;
+            const node = doc.createElement(index ? 'p' : 'h4');
+            const font = Object.assign({}, header.font, item.font);
+            node.style.margin = index ? '4px 0 0' : '0';
+            node.style.lineHeight = '1.5';
+            node.style.fontSize = Math.max(11, number(font.size, index ? 13 : 16)) + 'px';
+            if (index && !(item.font && item.font.size)) node.style.fontSize = Math.max(11, number(header.font.size, 16) * 0.8) + 'px';
+            node.style.fontWeight = index ? '400' : '600';
+            if (font.family) node.style.fontFamily = font.family;
+            if (font.color) node.style.color = font.color;
+            appendText(item.text, node);
+            element.appendChild(node);
+        }
+    }
+
+    function extractTitleUpdates(layout, mobile) {
+        const updates = [];
+        (layout.updatemenus || []).forEach((menu, menuIndex) => (menu.buttons || []).forEach((button, buttonIndex) => {
+            const update = { menuIndex, buttonIndex };
+            for (const [index, args] of [button.args, button.args2].entries()) {
+                const patch = args && args[button.method === 'update' ? 1 : button.method === 'relayout' ? 0 : -1];
+                if (!patch || typeof patch !== 'object' || Array.isArray(patch)) continue;
+                const keys = Object.keys(patch).filter(key => key === 'title' || key.startsWith('title.'));
+                if (!keys.length) continue;
+                let title = normalizeValue(layout.title || {});
+                if (typeof title === 'string') title = { text: title };
+                if (patch.title !== undefined) Object.assign(title, typeof patch.title === 'string' ? { text: patch.title } : patch.title);
+                for (const key of keys.filter(key => key !== 'title')) setPath(title, key.slice(6), normalizeValue(patch[key]));
+                update[index ? 'alternateTitle' : 'title'] = title;
+                update[index ? 'alternateHeader' : 'header'] = headerFromTitle(title, layout, mobile);
+                for (const key of keys) delete patch[key];
+            }
+            if (!update.header && !update.alternateHeader) return;
+            if (!button.name) button.name = 'responsive-title-' + menuIndex + ':' + buttonIndex;
+            update.name = button.name;
+            updates.push(update);
+        }));
+        return updates;
+    }
+
     function fitFigure(figure, measuredWidth, options = {}) {
         const width = Math.max(1, Math.floor(number(measuredWidth, 360)));
         const mobile = width < MOBILE_WIDTH;
+        const externalTitle = options.titlePlacement !== 'internal';
         const data = normalizeValue(Array.isArray(figure.data) ? figure.data : []);
         const sourceLayout = figure.layout || {};
         const layout = normalizeValue(sourceLayout);
@@ -714,15 +793,18 @@
         const plotWidth = Math.max(40, width - margin.l - margin.r);
         protectDataAnnotations(layout, plotWidth, mobile, warnings);
         const title = typeof layout.title === 'string' ? { text: layout.title } : layout.title || {};
+        const header = externalTitle ? headerFromTitle(title, layout, mobile) : null;
         const titleSize = mobile ? Math.min(number(title.font && title.font.size, 16), 16) : number(title.font && title.font.size, 18);
         const wrappedTitle = wrapText(title.text, titleSize, Math.max(40, width - 28));
         // Native menu clicks do not refit the figure; reserve the longest title up front.
-        const titleLines = Math.max(wrappedTitle.lines, ...yearMenus.flatMap(item =>
+        const titleLines = externalTitle ? 0 : Math.max(wrappedTitle.lines, ...yearMenus.flatMap(item =>
             layout.updatemenus[item.menuIndex].buttons.map(button => {
                 const value = button.args[1].title;
                 return wrapText(typeof value === 'string' ? value : value && value.text, titleSize, Math.max(40, width - 28)).lines;
             })));
-        if (title.text) {
+        const titleUpdates = externalTitle ? extractTitleUpdates(layout, mobile) : [];
+        if (externalTitle) layout.title = { text: '' };
+        if (title.text && !externalTitle) {
             title.text = wrappedTitle.text;
             title.font = Object.assign({}, title.font, { size: titleSize });
             // We reserve the multiline title region ourselves on mobile. Plotly's
@@ -797,7 +879,20 @@
             }
             margin.t = Math.max(Math.ceil(32 + titleLines * titleSize * 1.3 + topLines * 18 + (topLines ? 14 : 0)), Math.min(margin.t, 150));
         }
-        const legend = mobile ? legendMetrics(data, layout, plotWidth) : { height: 0, rows: 0 };
+        const legendFontSize = mobile ? 11 : number(layout.legend && layout.legend.font && layout.legend.font.size, 12);
+        const legend = mobile || externalTitle ? legendMetrics(data, layout, plotWidth, legendFontSize) : { height: 0, rows: 0 };
+        const titleBudget = titleLines * titleSize * 1.3;
+        // A short internal title can share the top with a small legend. Crowded
+        // internal headers use the bottom; wide authored legends keep their layout.
+        const legendPlacement = !legend.height ? 'preserve' : !externalTitle && mobile &&
+            (titleLines > 1 || titleBudget + legend.height + topLines * 18 > Math.min(150, number(sourceLayout.height, 520) * 0.3)) ? 'bottom' : 'top';
+        const bottomLegendHeight = legendPlacement === 'bottom' ? legend.height : 0;
+        if (externalTitle || mobile && legendPlacement === 'top') {
+            if (!mobile) topLines = Math.max(0, ...(layout.annotations || []).filter(a => a.visible !== false && a.showarrow === false &&
+                a.xref === 'paper' && a.yref === 'paper' && a.y >= 0.98).map(a =>
+                wrapText(a.text, number(a.font && a.font.size, 14), plotWidth).lines + Math.max(0, a.y - 1) * 20));
+            margin.t = Math.ceil(32 + titleBudget + topLines * 18 + (topLines ? 14 : 0) + (legendPlacement === 'top' ? legend.height : 0));
+        }
         const colorbars = mobile ? colorbarBands(data, layout, plotWidth) : [];
         const colorbarHeight = colorbars.reduce((sum, item) => sum + item.height, 0);
         const bottomPanels = panels.filter(panel => panel.domain.y[0] < 0.001);
@@ -809,39 +904,40 @@
         const menus = (layout.updatemenus || []).filter(menu => menu.visible !== false);
         const sliders = mobile ? (layout.sliders || []).filter(slider => slider.visible !== false) : [];
         const controlsHeight = mobile ? menus.length * 42 + sliders.length * 68 : 0;
-        if (mobile) margin.b = Math.max(margin.b, axisFoot + legend.height + colorbarHeight + footerHeight + controlsHeight + 12);
+        if (mobile) margin.b = Math.max(margin.b, axisFoot + bottomLegendHeight + colorbarHeight + footerHeight + controlsHeight + 12);
         const baseHeight = number(sourceLayout.height, 520);
-        const height = Math.max(400, mobile ? Math.max(baseHeight, margin.t + margin.b + minimumPlotHeight(panels, layout)) : baseHeight);
+        const height = Math.max(400, mobile || externalTitle ? Math.max(baseHeight, margin.t + margin.b + minimumPlotHeight(panels, layout)) : baseHeight);
         const plotHeight = height - margin.t - margin.b;
-        if (title.text && !mobile && title.y === undefined && title.yref !== 'paper' &&
+        if (!externalTitle && title.text && !mobile && title.y === undefined && title.yref !== 'paper' &&
             (!title.yanchor || title.yanchor === 'auto' || title.yanchor === 'top')) {
             Object.assign(title, { yref: 'container', yanchor: 'top', y: 1 });
         }
         // Plotly's multiline tspans use y as a baseline, unlike single-line titles.
         // Keep that baseline below the SVG edge in pixels, independent of chart height.
-        if (title.text && (mobile || title.yanchor === 'top' && title.yref !== 'paper' && number(title.y, 1) >= 0.9)) {
+        if (!externalTitle && title.text && (mobile || title.yanchor === 'top' && title.yref !== 'paper' && number(title.y, 1) >= 0.9)) {
             title.yref = 'container';
             title.y = Math.min(number(title.y, 1), 1 - (titleSize + 8) / height);
         }
-        if (mobile && legend.height) {
+        if (legend.height) {
             layout.legend = Object.assign({}, layout.legend, {
                 orientation: 'h', xref: 'paper', yref: 'paper', x: 0, xanchor: 'left',
-                y: -axisFoot / plotHeight, yanchor: 'top', itemwidth: 30,
-                font: Object.assign({}, layout.legend && layout.legend.font, { size: 11 }),
+                y: legendPlacement === 'top' ? 1 + (16 + topLines * 18) / plotHeight : -axisFoot / plotHeight,
+                yanchor: legendPlacement === 'top' ? 'bottom' : 'top', itemwidth: 30,
+                font: Object.assign({}, layout.legend && layout.legend.font, { size: legendFontSize }),
                 tracegroupgap: 0
             });
         }
-        let colorbarOffset = axisFoot + legend.height + 8;
+        let colorbarOffset = axisFoot + bottomLegendHeight + 8;
         for (const item of colorbars) {
             item.bar.y = -colorbarOffset / plotHeight;
             colorbarOffset += item.height;
         }
-        let footerOffset = axisFoot + legend.height + colorbarHeight + 8;
+        let footerOffset = axisFoot + bottomLegendHeight + colorbarHeight + 8;
         for (const item of footers) {
             Object.assign(item.annotation, { y: 0, yanchor: 'top', yshift: -footerOffset });
             footerOffset += item.height;
         }
-        let controlOffset = axisFoot + legend.height + colorbarHeight + footerHeight + 8;
+        let controlOffset = axisFoot + bottomLegendHeight + colorbarHeight + footerHeight + 8;
         for (const menu of menus) {
             for (const button of menu.buttons || []) {
                 if (!button.label) {
@@ -877,7 +973,7 @@
             controlOffset += 68;
         }
         layout.height = height;
-        return { data, layout, config, height, panels, stacked, yearMenus, warnings: [...new Set(warnings)] };
+        return { data, layout, config, height, header, titleUpdates, legendPlacement, panels, stacked, yearMenus, warnings: [...new Set(warnings)] };
     }
 
     function overlaps(a, b) {
@@ -1020,5 +1116,5 @@
         return hidden;
     }
 
-    return { fitFigure, wrapText, normalizeValue, resolveTextCollisions, fitCellText, fitTreemapLabels };
+    return { fitFigure, renderHeader, wrapText, normalizeValue, resolveTextCollisions, fitCellText, fitTreemapLabels };
 });

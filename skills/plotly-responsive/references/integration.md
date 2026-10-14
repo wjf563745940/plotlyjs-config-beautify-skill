@@ -1,6 +1,6 @@
 # 接入运行时模板
 
-模板不依赖框架。它导出 fitFigure、normalizeValue、wrapText、resolveTextCollisions，以及树图排字辅助 fitCellText/fitTreemapLabels；在浏览器脚本中是 window.PlotlyResponsive，在 CommonJS 中通过 require 获取。
+模板不依赖框架。它导出 fitFigure、renderHeader、normalizeValue、wrapText、resolveTextCollisions，以及树图排字辅助 fitCellText/fitTreemapLabels；在浏览器脚本中是 window.PlotlyResponsive，在 CommonJS 中通过 require 获取。
 
 本项目固定使用 Plotly 4.1.1，演示入口加载仓库中的 plotly-4.1.1.min.js；其他项目也可使用固定版本 CDN 或其已验证的现代版本。确认标题、legend 和 uniformtext 等属性被该版本支持。[官方版本说明](https://plotly.com/javascript/getting-started/)指出 plotly-latest 已冻结。
 
@@ -11,18 +11,49 @@
 ~~~js
 const source = PlotlyResponsive.normalizeValue(modelFigure);
 const fitted = PlotlyResponsive.fitFigure(source, container.getBoundingClientRect().width);
+PlotlyResponsive.renderHeader(headerElement, fitted.header); // 与 container 同级，位于其前方
 container.style.height = fitted.height + 'px';
 await Plotly.newPlot(container, fitted.data, fitted.layout, fitted.config);
 PlotlyResponsive.resolveTextCollisions(container);
 ~~~
 
-fitFigure 返回 {data, layout, config, height, panels, stacked, yearMenus, warnings}。只把 data/layout/config 传给 Plotly。panels 用于回归检查，yearMenus 描述补齐的年份筛选器，warnings 用于记录输入结构修复和缺少按钮标签等诊断。
+fitFigure 返回 {data, layout, config, height, header, titleUpdates, legendPlacement, panels, stacked, yearMenus, warnings}。默认外置主标题，必须将 header 传给 renderHeader；height 不包括外层标题。只把 data/layout/config 传给 Plotly。panels 用于回归检查，yearMenus 描述补齐的年份筛选器，warnings 用于记录输入结构修复和缺少按钮标签等诊断。
 
 用 ResizeObserver 监听容器宽度；只在宽度变化时计算新 figure，通过 Plotly.react 更新。合并快速 resize 产生的请求，并串行调用 Plotly，避免多个布局并发覆盖。图表高度由适配结果设置；只改变高度的 observer 事件应跳过。
 
 在首次渲染、react、restyle 和 plotly_afterplot 后再次检查标签。用 requestAnimationFrame 合并检查；resolveTextCollisions 会先恢复此前隐藏的标签，再根据新边界判断。首次渲染和 resize 的“就绪”状态应等待标签检查完成，截图或验收不能只等待 newPlot 的 Promise。
 
 组件卸载时取消 requestAnimationFrame、断开 observer、移除事件订阅，并按项目生命周期调用 Plotly.purge。
+
+## 外置主标题与顶部图例
+
+默认 `titlePlacement: 'external'`：完整 `layout.title.text` 和原生 subtitle 保存在返回的 header，渲染副本的 title 清空，主标题不重复。创建与图表同级的 HTML 容器 `headerElement`，每次 fit 后调用 `renderHeader(headerElement, fitted.header)`；不要再加原来的标题摘要。HTML 自然换行并占据实际高度，支持基础文字富文本，复杂 HTML/MathJax 由业务组件处理。helper 不插入脚本、事件属性或图片。
+
+图例保持原生交互，在 SVG 顶部独立预算条目/行高；子图标题、图内数据标注不提取。显式设置 `{titlePlacement:'internal'}` 才保留 SVG 主标题：窄屏多行标题或顶部拥挤时移动图例到底部，短标题/少量图例仍可顶部共存；容器 >=560px 时保留作者图例布局。大尺寸恢复原子图 domain，不强制套用窄屏底部图例。主标题位置属性 x/y/xref/yref 仅对内置模式有意义。
+
+默认模式将 update/relayout 按钮中的 title / title.* 从 SVG 更新参数移到 `titleUpdates`，其余数据与布局命令保留；args2 的标题保存在 alternateHeader/alternateTitle。首次 newPlot 后订阅一次：
+
+~~~js
+let titleUpdates = []; // 每次 fit 后替换为 fitted.titleUpdates
+container.on('plotly_buttonclicked', event => {
+    if (event.button?.execute === false) return; // 应用自己执行的按钮由业务回调同步
+    const item = titleUpdates.find(update => update.name === event.button?.name);
+    const header = item?.[event.active === -1 ? 'alternateHeader' : 'header'];
+    const title = item?.[event.active === -1 ? 'alternateTitle' : 'title'];
+    if (header) PlotlyResponsive.renderHeader(headerElement, header);
+    // 补齐的年份菜单只保存 yearSelections；保持完整源标题和数据。
+    const yearMenu = yearMenus.find(menu => menu.buttonNames.includes(event.button?.name));
+    if (yearMenu) {
+        yearSelections[yearMenu.menuIndex] = yearMenu.values[yearMenu.buttonNames.indexOf(event.button.name)];
+    } else if (title) {
+        source.layout.title = PlotlyResponsive.normalizeValue(title);
+    }
+});
+~~~
+
+无 name 的标题按钮得到稳定的索引标识；已有 name 保留，接入时应保证同一图中的标题按钮 name 唯一。使用自定义回调、动画 frames、slider 或直接调用 relayout 更新标题的产品，需要在对应业务事件中更新外置标题与保存的源配置；当前模板的 titleUpdates 接入只覆盖 update/relayout 菜单按钮，不接管这些业务事件。
+
+`Plotly.toImage` 不包含外置 HTML。需要标题的导出在独立容器从完整源 figure fit 为 internal，按导出宽度渲染，再生成图片；将当前 yearSelections 一并传入。也可由业务合成 HTML 标题和图表。不能只把当前已过滤的图表数据当作完整源数据。
 
 ## 数据和交互
 
@@ -57,12 +88,17 @@ resolveTextCollisions 会先调用 fitTreemapLabels；不需额外事件订阅�
 ~~~js
 const yearSelections = {};
 let yearMenus = [];
+let titleUpdates = [];
 function fit(width) {
     const fitted = PlotlyResponsive.fitFigure(source, width, { yearSelections });
     yearMenus = fitted.yearMenus;
+    titleUpdates = fitted.titleUpdates;
+    PlotlyResponsive.renderHeader(headerElement, fitted.header);
     return fitted;
 }
 container.on('plotly_buttonclicked', event => {
+    const titleUpdate = titleUpdates.find(item => item.name === event.button?.name);
+    if (titleUpdate?.header) PlotlyResponsive.renderHeader(headerElement, titleUpdate.header);
     const menu = yearMenus.find(item => item.buttonNames.includes(event.button?.name));
     if (!menu) return;
     yearSelections[menu.menuIndex] = menu.values[menu.buttonNames.indexOf(event.button.name)];
@@ -86,7 +122,7 @@ node tests/responsive.test.js
 按日期保存 `reports/responsive-YYYY-MM-DD/{360px,480px}/results.json` 和完整 JPG；每个结果包含 name、输入 sha256、summary、viewport、charts、screenshot。`manifest.json` 保存 date、plotlyVersion、adapterHash、widths:[360,480]、sourceHashes 和 unitTests；`unit-tests.txt` 保存本次测试输出。实际审阅截图后运行：
 
 ~~~powershell
-node tests/write-responsive-report.js reports/responsive-2026-10-14-treemap
+node tests/write-responsive-report.js reports/responsive-2026-10-14-header
 ~~~
 
 该命令拒绝缺少 360px、源文件/适配器指纹变更、图表数量不匹配、渲染失败、页面横向溢出、所测文字越界/相交和空层级图等情况，再生成逐图报告和画廊。报告不能代替实际截图审阅。`reports/480px/` 及 write-480-report.js 是上轮的历史验收；新增数据后使用双尺寸报告。
