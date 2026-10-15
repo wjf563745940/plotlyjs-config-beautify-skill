@@ -17,7 +17,7 @@ await Plotly.newPlot(container, fitted.data, fitted.layout, fitted.config);
 PlotlyResponsive.resolveTextCollisions(container);
 ~~~
 
-fitFigure 返回 {data, layout, config, height, header, titleUpdates, legendPlacement, panels, stacked, yearMenus, warnings}。默认外置主标题，必须将 header 传给 renderHeader；height 不包括外层标题。只把 data/layout/config 传给 Plotly。panels 用于回归检查，yearMenus 描述补齐的年份筛选器，warnings 用于记录输入结构修复和缺少按钮标签等诊断。
+fitFigure 返回 {data, layout, config, height, header, titleUpdates, legendPlacement, annotationNotes, panels, stacked, yearMenus, warnings}。默认外置主标题，必须将 header 传给 renderHeader；height 不包括外层标题。只把 data/layout/config 传给 Plotly。annotationNotes 描述端点标注的编号与完整源内容，panels 用于回归检查，yearMenus 描述补齐的年份筛选器，warnings 用于记录输入结构修复和缺少按钮标签等诊断。
 
 用 ResizeObserver 监听容器宽度；只在宽度变化时计算新 figure，通过 Plotly.react 更新。合并快速 resize 产生的请求，并串行调用 Plotly，避免多个布局并发覆盖。图表高度由适配结果设置；只改变高度的 observer 事件应跳过。
 
@@ -68,6 +68,16 @@ container.on('plotly_buttonclicked', event => {
 - 层级数组错位仅在元数据能够确认缺失根首项时修复；不确定的错位会抛出错误，应在组件显示输入诊断。根据汇总关系推断 branchvalues=total 时也会返回 warning；显式 branchvalues 保留。
 - 无箭头且使用数据坐标/axis domain 的注释会增加可读性保护：实色底、中性默认前景、至少 12px 字号、4px 内边距。主标题、paper/paper 标题脚注、visible:false 注释不套用。坐标和数值不变；对应水平参考线的 xref/yref/y0/y1 精确匹配时边框沿用线色，曲线及参考线颜色保持。
 - 背景取 layout/template 的 plot/paper 色并合成透明度；支持 hex、rgb(a) 与常见命名色。显式不透明底与足够对比度的文字颜色保留，半透明底合成为实色；默认前景按背景选择深/浅中性色并检查 4.5:1。未知前景保留并返回测量提示；自定义内联颜色、整体淡出 opacity 和图外背景要通过实际渲染确认。明暗主题规则有单测，本轮实际浏览器验收为当前 mocks 的主题。
+
+## 端点标注与图例空间
+
+窄屏普通图例根据完整条目宽度选择列数，设置 `entrywidthmode:'fraction'`；仍使用 Plotly 原生图例与点击行为。图例的 paper x 可略为负数，以利用左轴上方留白；不能把它钳回 0，也不能把 xref 换成 container 后假设可用宽度不变。带 legendgroup/分组标题的图例不强制列数，原分组与点击参数保留。宽屏恢复作者对应策略。
+
+`annotationNotes` 为 `{annotationIndex,label,text,x,y,xref,yref}` 数组。对于可确认的数值/日期端点、朝外、无箭头的长标注，适配副本保留数据坐标，用 `[1]` 等编号朝内对齐，完整内容与对应 y 值写入 SVG 底部 paper 注释，并保留 hovertext。已有自定义 hovertext 追加保留。只在无右轴且全部为笛卡尔子图时回收这类标注释放的右边距。无需额外渲染 notes；如业务自定义说明组件，应先明确避免与默认说明重复。
+
+只从完整源 figure 重新 fit，不能将带编号的渲染副本作为下一次输入。显式范围（含 matches 关联轴）、分类/对数/反向轴、箭头、已有 xshift/yshift、非端点或无法确认的坐标均不自动压缩。窄→宽时恢复完整图内标注；宽→窄时重新生成编号与说明。直接 relayout 改写端点标注、缩放后需要重新安排说明等业务行为，由调用方更新源配置并重新适配；当前模板不监听任意 relayout。
+
+本仓库 `spaceUsage` DOM 审计记录图例列数/行数、实际绘图区宽高、第一条路径横向占用及可见标注全文。mock22 的 >=85% 门槛只针对该完整时序，不能用于有意留空的轴范围。说明、图例交互和缩放/更新另在 `reports/mock22-2026-10-14/` 留证。
 
 ## 矩形树图标签
 
@@ -122,7 +132,7 @@ node tests/responsive.test.js
 按日期保存 `reports/responsive-YYYY-MM-DD/{360px,480px}/results.json` 和完整 JPG；每个结果包含 name、输入 sha256、summary、viewport、charts、screenshot。`manifest.json` 保存 date、plotlyVersion、adapterHash、widths:[360,480]、sourceHashes 和 unitTests；`unit-tests.txt` 保存本次测试输出。实际审阅截图后运行：
 
 ~~~powershell
-node tests/write-responsive-report.js reports/responsive-2026-10-14-header
+node tests/write-responsive-report.js reports/responsive-2026-10-14-mock22
 ~~~
 
 该命令拒绝缺少 360px、源文件/适配器指纹变更、图表数量不匹配、渲染失败、页面横向溢出、所测文字越界/相交和空层级图等情况，再生成逐图报告和画廊。报告不能代替实际截图审阅。`reports/480px/` 及 write-480-report.js 是上轮的历史验收；新增数据后使用双尺寸报告。

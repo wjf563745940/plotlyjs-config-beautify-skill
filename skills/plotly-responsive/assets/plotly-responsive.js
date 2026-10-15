@@ -435,7 +435,7 @@
         });
     }
 
-    function legendMetrics(data, layout, availableWidth, fontSize = 11) {
+    function legendMetrics(data, layout, availableWidth, fontSize = 11, columns = false) {
         if (layout.showlegend === false || (layout.legend && layout.legend.visible === false)) return { height: 0, rows: 0 };
         const entries = [];
         for (const [i, trace] of data.entries()) {
@@ -454,6 +454,13 @@
             }
         }
         if (!entries.length) return { height: 0, rows: 0 };
+        if (columns && !data.some(trace => trace.legendgroup || trace.legendgrouptitle && trace.legendgrouptitle.text)) {
+            const widest = Math.max(...entries.map(text => Math.max(...plainText(text).split('\n').map(line => textWidth(line, fontSize))) + 54));
+            const count = Math.max(1, Math.min(entries.length, Math.floor(availableWidth / widest)));
+            const rows = Math.ceil(entries.length / count);
+            const rowHeight = Math.max(...entries.map(text => plainText(text).split('\n').length * (fontSize + 3) + 5));
+            return { height: rows * rowHeight + 8, rows, columns: count };
+        }
         let used = 0;
         let rowHeight = 0;
         let height = 0;
@@ -576,6 +583,59 @@
             }
             if (annotation.borderwidth === undefined) annotation.borderwidth = 1;
         }
+    }
+
+    // Long outward labels at a data endpoint can dominate Plotly's autorange.
+    // Keep the data anchor as a small key; put the complete explanation below.
+    function compactEndpointAnnotations(data, layout, plotWidth, warnings) {
+        const notes = [];
+        function coordinate(value) {
+            if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+            return typeof value === 'string' && /^\d{4}-\d\d-\d\d(?:T| |$)/.test(value) ? Date.parse(value) : NaN;
+        }
+        for (const [annotationIndex, annotation] of (layout.annotations || []).entries()) {
+            const ref = annotation.xref || 'x';
+            if (annotation.visible === false || annotation.showarrow !== false || !/^x\d*$/.test(ref) ||
+                !/^y\d*$/.test(annotation.yref || 'y') || !['left', 'right'].includes(annotation.xanchor) ||
+                annotation.textangle || annotation.xshift || annotation.yshift || annotation.templateitemname) continue;
+            const refs = new Set([ref]);
+            const axes = Object.entries(layout).filter(([key]) => /^xaxis\d*$/.test(key));
+            for (let pass = 0; pass < axes.length; pass++) for (const [key, axis] of axes) {
+                const keyRef = key.replace('axis', '');
+                if (axis.matches && (refs.has(keyRef) || refs.has(axis.matches))) { refs.add(keyRef); refs.add(axis.matches); }
+            }
+            if ([...refs].some(id => {
+                const axis = layout[axisKey(id)] || {};
+                return axis.range || axis.autorange === false || axis.autorange === 'reversed' || axis.scaleanchor ||
+                    axis.calendar && axis.calendar !== 'gregorian' || axis.type && !['linear', 'date'].includes(axis.type);
+            })) continue;
+            const values = data.filter(trace => refs.has(trace.xaxis || 'x') && trace.visible !== false && trace.visible !== 'legendonly')
+                .flatMap(trace => Array.isArray(trace.x) ? trace.x : []).filter(value => value !== null && value !== undefined);
+            const positions = values.map(coordinate), x = coordinate(annotation.x);
+            if (positions.length < 2 || positions.some(value => !Number.isFinite(value)) || !Number.isFinite(x)) continue;
+            const min = Math.min(...positions), max = Math.max(...positions);
+            if (max <= min) continue;
+            const right = Math.abs(x - max) <= (max - min) * 1e-9 && annotation.xanchor === 'left';
+            const left = Math.abs(x - min) <= (max - min) * 1e-9 && annotation.xanchor === 'right';
+            const size = Math.max(12, number(annotation.font && annotation.font.size, 12));
+            if ((!right && !left) || Math.max(...plainText(annotation.text).split('\n').map(line => textWidth(line, size))) < Math.max(80, plotWidth * 0.28)) continue;
+            const label = '[' + (notes.length + 1) + ']';
+            notes.push({ annotationIndex, label, text: annotation.text, x: annotation.x, y: annotation.y, xref: ref, yref: annotation.yref || 'y' });
+            annotation.hovertext = [annotation.text, annotation.hovertext].filter(Boolean).join('<br>');
+            annotation.text = label;
+            annotation.xanchor = right ? 'right' : 'left';
+        }
+        if (notes.length) {
+            for (const note of notes) {
+                const original = layout.annotations[note.annotationIndex];
+                const value = typeof note.y === 'number' ? Number(note.y.toPrecision(8)) : note.y;
+                layout.annotations.push({ text: note.label + '（' + value + '）' + note.text,
+                    x: 0, y: -1, xref: 'paper', yref: 'paper', xanchor: 'left', yanchor: 'top',
+                    align: 'left', showarrow: false, font: { size: 12, color: original.font && original.font.color } });
+            }
+            warnings.push('窄屏端点长标注已改为图内编号和图下完整说明；坐标锚点、数据与自动轴范围保留。');
+        }
+        return notes;
     }
 
     function titleYear(button) {
@@ -790,7 +850,14 @@
             r: mobile ? Math.min(dualRight ? Math.max(number(sourceMargin.r, 20), 52) : number(sourceMargin.r, 20), Math.floor(width * 0.2)) : number(sourceMargin.r, 30),
             t: number(sourceMargin.t, 70), b: number(sourceMargin.b, 50)
         });
-        const plotWidth = Math.max(40, width - margin.l - margin.r);
+        let plotWidth = Math.max(40, width - margin.l - margin.r);
+        const annotationNotes = mobile ? compactEndpointAnnotations(data, layout, plotWidth, warnings) : [];
+        // Release only the displaced callouts' gutter. Polar names, right axes,
+        // and other authored margins still need their existing space.
+        if (annotationNotes.length && !dualRight && panels.every(panel => panel.kind === 'cartesian')) {
+            margin.r = Math.min(margin.r, 24);
+            plotWidth = Math.max(40, width - margin.l - margin.r);
+        }
         protectDataAnnotations(layout, plotWidth, mobile, warnings);
         const title = typeof layout.title === 'string' ? { text: layout.title } : layout.title || {};
         const header = externalTitle ? headerFromTitle(title, layout, mobile) : null;
@@ -880,7 +947,7 @@
             margin.t = Math.max(Math.ceil(32 + titleLines * titleSize * 1.3 + topLines * 18 + (topLines ? 14 : 0)), Math.min(margin.t, 150));
         }
         const legendFontSize = mobile ? 11 : number(layout.legend && layout.legend.font && layout.legend.font.size, 12);
-        const legend = mobile || externalTitle ? legendMetrics(data, layout, plotWidth, legendFontSize) : { height: 0, rows: 0 };
+        const legend = mobile || externalTitle ? legendMetrics(data, layout, mobile ? width - margin.r - 12 : plotWidth, legendFontSize, mobile) : { height: 0, rows: 0 };
         const titleBudget = titleLines * titleSize * 1.3;
         // A short internal title can share the top with a small legend. Crowded
         // internal headers use the bottom; wide authored legends keep their layout.
@@ -926,6 +993,13 @@
                 font: Object.assign({}, layout.legend && layout.legend.font, { size: legendFontSize }),
                 tracegroupgap: 0
             });
+            if (mobile) {
+                // Horizontal legends still use plot width with xref=container, and
+                // can push the left margin. A paper anchor above the left gutter
+                // lets native Plotly include that free space in its width budget.
+                layout.legend.x = Math.min(0, (12 - margin.l) / plotWidth);
+                if (legend.columns) Object.assign(layout.legend, { entrywidth: 1 / legend.columns, entrywidthmode: 'fraction' });
+            }
         }
         let colorbarOffset = axisFoot + bottomLegendHeight + 8;
         for (const item of colorbars) {
@@ -973,7 +1047,7 @@
             controlOffset += 68;
         }
         layout.height = height;
-        return { data, layout, config, height, header, titleUpdates, legendPlacement, panels, stacked, yearMenus, warnings: [...new Set(warnings)] };
+        return { data, layout, config, height, header, titleUpdates, legendPlacement, annotationNotes, panels, stacked, yearMenus, warnings: [...new Set(warnings)] };
     }
 
     function overlaps(a, b) {

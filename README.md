@@ -18,6 +18,8 @@
 | 长中文标题、副标题超出边界 | 默认提取到 SVG 外的 HTML 标题区，自然换行，保留支持的富文本 |
 | 分类刻度密集、长标签互相覆盖 | 换行并显示有代表性的刻度，保留首尾，原始类别和数据仍保留 |
 | 图例、脚注、按钮挤在一起 | 默认图例置顶并独立预算；脚注、色条、按钮在底部分区，下拉菜单向上展开 |
+| 图例右侧留白，条目却排成一长列 | 窄屏利用坐标轴上方的空白，按完整条目宽度计算列数，保留原生点击交互 |
+| 端点长标注把时间轴撑大，行情挤在一侧 | 窄屏将可确认的端点长标注改为原坐标编号和图下完整说明，释放对应边距 |
 | 竖向色条挤占绘图区 | 窄屏改为横向色条，单独预留标题、刻度和高度 |
 | 折线穿过均值等标注，文字难读 | 为适用的数据坐标标注增加实色底、小内边距和可读前景色，保留参考坐标 |
 | 散点或柱形数据标签重叠、被裁切 | 渲染后按真实 SVG 边界检查，可隐藏拥挤的可选标签，数据与 hover 保留 |
@@ -37,6 +39,14 @@
 接入时必须渲染返回的 `header`，否则默认模式的主标题不会出现。`renderHeader` 使用受控的文字格式子集（如 `<b>`、`<sup>`、`<br>` 和文字样式 `span`），清除事件属性及活动内容；复杂 HTML、链接和 MathJax 主标题需由业务组件单独支持。年份/普通菜单通过 `titleUpdates` 同步外置标题，后续 resize 继续保存当前选择，详见 [接入说明](skills/plotly-responsive/references/integration.md)。
 
 **图片导出：** `Plotly.toImage` 只导出图表本身，外置 HTML 标题不会自动进入图片。需要标题时，在独立导出容器中从完整源配置重新调用 `fitFigure(source, exportWidth, { titlePlacement: 'internal', yearSelections })`，渲染后导出；或由产品将 HTML 标题与图表合成。不要修改正在展示的原始 figure。
+
+### 图例列数与实际绘图区
+
+只设置 `legend.orientation: 'h'` 不能保证充分利用空间。当前 Plotly 在多行图例中可能按最长条目统一占宽；窄屏适配会为没有分组的普通图例计算列数，使用 `entrywidthmode: 'fraction'`，并利用左轴上方的空白。保留 `legendgroup` 和分组点击语义，不为了排成两列拆散分组。列数随容器与文字长度变化，长条目确实放不下时仍为一列。
+
+验收还要检查**数据本身占了多少绘图区**。例如 mock22 的日期数据截止 2026 年 9 月，但右端朝外的长标注使自动轴延伸到 2027 年。窄屏现在保留原 x/y/ref，以 `[1]` 等编号标记位置，完整说明及对应 y 值放在图下，hover 也保留说明；只回收这些标注原先占用的右边距。360px 图例为两列，480px 为三列，行情横向占用分别约 98.7% / 99.1%。
+
+该压缩仅用于可确认的数值/日期端点、无箭头、朝外且足够长的标注。显式范围、反向/分类/对数轴、已有偏移和宽屏配置保持原意；不修改数据、日期间隔、匹配轴或 `rangebreaks`。说明仍在 SVG 内，无需新增 HTML 容器。不能用裁掉说明、固定一个日期范围或统一缩小字号来换取“无重叠”。
 
 ### 实际渲染截图
 
@@ -153,7 +163,7 @@ const { fitFigure, renderHeader, normalizeValue, wrapText, resolveTextCollisions
 | `wrapText(text, fontSize, maxWidth)` | 根据宽度估算换行，保留支持的富文本标记；返回 `{ text, lines }` |
 | `resolveTextCollisions(container)` | 在浏览器渲染后检查 SVG 数据标签，隐藏碰撞或越界的可选标签，返回隐藏数量 |
 
-`fitFigure` 返回 `{ data, layout, config, height, header, titleUpdates, legendPlacement, panels, stacked, yearMenus, warnings }`。仅将 `data`、`layout`、`config` 传给 Plotly；`height` 为 SVG 容器高度，不包括外置标题。`header` 用于 `renderHeader`，内置模式为 `null`；`titleUpdates` 保存按钮标题更新，`legendPlacement` 为 `top` / `bottom` / `preserve`（无图例调整或宽屏内置模式）。
+`fitFigure` 返回 `{ data, layout, config, height, header, titleUpdates, legendPlacement, annotationNotes, panels, stacked, yearMenus, warnings }`。仅将 `data`、`layout`、`config` 传给 Plotly；`height` 为 SVG 容器高度，不包括外置标题。`header` 用于 `renderHeader`，内置模式为 `null`；`titleUpdates` 保存按钮标题更新，`legendPlacement` 为 `top` / `bottom` / `preserve`（无图例调整或宽屏内置模式）。`annotationNotes` 记录编号、原标注索引、完整文字及坐标，用于检查说明与原数据的对应关系；完整说明已写入返回的 layout。
 
 ## 本地开发与验证
 
@@ -192,7 +202,7 @@ node tests/responsive.test.js
 
 测试使用 Node.js 内置测试模块，无需安装测试依赖。本仓库在 Node.js 22.22.0 下验证。测试会自动发现 `mocks/mock*.js`，但部分专项测试还依赖特定样例，因此仅添加一个演示文件不能运行完整套件。
 
-截至 2026-10-14，本地完整 fixtures 的规则回归为 **55/55 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字及两种标题/图例模式等约束。
+截至 2026-10-14，本地完整 fixtures 的规则回归为 **59/59 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字、两种标题/图例模式、图例分列及端点标注说明等约束。
 
 ### 移动端视觉验收
 
@@ -202,6 +212,7 @@ node tests/responsive.test.js
 - 检查外置标题完整且只显示一次，位于 SVG 上方、卡片内部；图例、子图标题、坐标轴、色条、控件和数据标签没有遮挡。
 - 显式内置模式同时检查窄屏拥挤时的底部图例和大尺寸下保留原布局。
 - 检查图形确实存在，包括层级图是否空白、稀疏日期柱形是否可见，以及 SVG 裁切。
+- 检查图例实际列数和留白，以及数据路径相对绘图区的占用比例；区分边距/domain 挤压、标注影响 autorange 和真实稀疏数据。mock22 的专项门槛要求至少两列、行情横向占用至少 85%、五条完整说明仍存在；不将此比例机械套到稀疏散点或作者明确范围。
 - 对适用的数据坐标标注检查实色底、文字包围关系和至少 4.5:1 的实际文字对比度。
 
 本地开发工具 `tests/browser-layout-audit.js` 提供只读 DOM 测量函数，需要在浏览器上下文执行。报告校验器需要先采集截图、测量结果、manifest 和测试输出；它本身不会启动浏览器或生成截图。产物格式见 [接入说明](skills/plotly-responsive/references/integration.md)。本地具备校验脚本、完成采集及截图审阅后运行：
