@@ -14,8 +14,8 @@ description: Use when model-produced Plotly.js figures have clipped or overlappi
 1. 检查模型原文、运行中的 Plotly 版本、容器实际宽度、轨迹类型、坐标轴引用、domain、注释和控件。将失败输入保留为原始 fixture。
 2. 在这些视口及桌面宽度检查标题、图例、坐标轴、色条、子图标题、数据标签和控件；再检查窄到宽、宽到窄、数据更新后的布局。区分主标题、子图标题和数据坐标上的基准线标注：后者常因曲线穿过透明文字底而不可读，即使文字边界互不相交。记录 innerWidth、页面 clientWidth 和真实图表宽度。文字测量应使用渲染结果的边界，不能把字符数估算当作视觉通过。检查图形确实存在：就绪状态、空白树图或亚像素柱宽不能通过验收；检查 SVG clip-path，文字在卡片内仍可能被绘图区裁切。
 3. 在适配层修复一般原因。对源 figure 做独立副本，每次 resize 从源配置重新计算，保留数据值、轴引用、关联关系与交互状态。根据拥挤程度增加纵向空间或把并排子图改为纵向，避免仅缩小整个图表。
-4. 为发现的问题增加能检查实际约束的回归：子图不相交、标题仍有对应子图、数值与引用保留、交互控件分区、源输入不变。控件修复还要逐项点击，确认真实数据、选中项和标题一致，并检查展开、resize、数据更新及恢复全部。本仓库运行 `node tests/responsive.test.js`，自动发现 `mocks/mock*.js`；其他项目使用其回归入口。浏览器验收须等待全部图表及渲染后的标签检查完成，再保存完整截图和 SVG 边界结果。本仓库使用 tests/browser-layout-audit.js 的只读函数，传入原始 fixture 的数据注释索引，采集全部当前 mocks 的 360px 与 480px；外置模式检查标题在卡片内、SVG 之前、完整且不重复，默认顶部图例；显式内置模式补充窄屏/宽屏位置验收。检查真实注释底色不透明、文字在底框内、各可见 tspan 的最低对比度至少 4.5:1。树图还要检查标签所在方块/父标题条的实际宽高、字号、换行和省略号，点击展开及返回再复验。保存输入/适配器 SHA-256 和测试输出，运行 `node tests/write-responsive-report.js reports/responsive-YYYY-MM-DD`。最新产物在 reports/responsive-2026-10-14-mock22/；此前按日期保留的 reports 是历史证据。
-5. 另验收空间利用率：记录图例实际列数、行数、条目数、绘图区宽高与数据路径边界；没有碰撞不代表布局合理。若图形挤在一侧，分别检查 margin/domain、自动轴范围中的 annotations/shapes、作者显式 range 和真实稀疏数据。先定位空间消耗来源，再修复，不能一律增加图高或强制设定数据范围。本轮最新产物为 reports/responsive-2026-10-14-mock22/；mock22 专项门槛为至少两列、行情横向占用至少 85%、全部长说明存在。该比例不用于作者指定的范围或稀疏散点。
+4. 为发现的问题增加能检查实际约束的回归：子图不相交、标题仍有对应子图、数值与引用保留、交互控件分区、源输入不变。控件修复还要逐项点击，确认真实数据、选中项和标题一致，并检查展开、resize、数据更新及恢复全部。本仓库运行 `node tests/responsive.test.js`，自动发现 `mocks/mock*.js`；其他项目使用其回归入口。浏览器验收须等待全部图表及渲染后的标签检查完成，再保存完整截图和 SVG 边界结果。本仓库使用 tests/browser-layout-audit.js 的只读函数，传入原始 fixture 的数据注释索引，采集全部当前 mocks 的 360px 与 480px；外置模式检查标题在卡片内、SVG 之前、完整且不重复，默认顶部图例；显式内置模式补充窄屏/宽屏位置验收。检查真实注释底色不透明、文字在底框内、各可见 tspan 的最低对比度至少 4.5:1。树图还要检查标签所在方块/父标题条的实际宽高、字号、换行和省略号，点击展开及返回再复验。保存输入/适配器 SHA-256 和测试输出，运行 `node tests/write-responsive-report.js reports/responsive-YYYY-MM-DD`。最新产物在 reports/responsive-2026-10-15-treemap-drilldown/；此前按日期保留的 reports 是历史证据。
+5. 另验收空间利用率：记录图例实际列数、行数、条目数、绘图区宽高与数据路径边界；没有碰撞不代表布局合理。若图形挤在一侧，分别检查 margin/domain、自动轴范围中的 annotations/shapes、作者显式 range 和真实稀疏数据。先定位空间消耗来源，再修复，不能一律增加图高或强制设定数据范围。本轮最新产物为 reports/responsive-2026-10-15-treemap-drilldown/；mock22 专项门槛为至少两列、行情横向占用至少 85%、全部长说明存在。该比例不用于作者指定的范围或稀疏散点。
 6. 将输入名、原因、修复和验证范围记录在 [references/fix-log.md](references/fix-log.md)。未做视觉验证或输入本身缺少交互语义时明确记录。
 
 ## 已验证的处理原则
@@ -44,5 +44,6 @@ description: Use when model-produced Plotly.js figures have clipped or overlappi
 - 对叶节点引用缺失父节点的层级图，可补充由现有子节点推导的结构节点；branchvalues=total 的新增父值取子节点和。保留已有节点值并报告派生修复；对无法确定的业务数据和交互意图要求真实输入。
 - 层级图数组少一个根首项时，仅在叶节点元数据逐项对应、候选父引用有效且无环时补齐 parents/customdata 的根首项；不能仅凭长度差猜测错位位置。无法确认时显式报错。未声明 branchvalues 时，若根值等于直属子值之和、所有父值覆盖子值，可推断 total 并报告；显式 total/remainder 优先，原 values/colors 不改写。
 - 矩形树图名称不能只依赖 uniformtext 的缩小/隐藏。先判定真实宽、高，扣除内边距后按实际字体测量；能完整显示则保留，优先换行，必要时降至可读下限，再以省略号表示剩余内容。当前密集树图默认门槛为 24×18px、字号下限 10px、内边距 2px，需按目标字体及终端复验；宽高必须分别达标，面积大而过窄/过扁仍隐藏。父节点只使用子框上方的标题条；省略后的每行及整体边界均在对应框内。仅处理纯文本/已有换行，不拆坏复杂富文本或数学标签，不补造 textinfo:none 的叶名称。保留原 labels/ids/values/customdata/hover；每次渲染、缩放、展开/返回从完整显示源重新排字，不能累积缩写。接入细节见 integration.md。
+- 树图放大后必须检查原本隐藏的名称恢复，不能只检查已显示文字的边界。原生层级变化可在初次检查之后重写 display/transform；首次文字适配自动观察树图 DOM，连续两帧稳定后重新按完整源排字，适配器自身写入期间断开观察以免循环。保留钻取层级，组件卸载时 disconnectTreemapLabels。mock21 的其他AI、CPU、云计算及路径栏返回均需点击验收，另用仅初次调用一次适配的接入页确认自动恢复，不依赖演示页额外 afterplot 回调。
 
 页面支持 index.html?mock=mock3_point 等带后缀名称；默认 mock2。fixture 应给 window.mockData 赋值为 figure 数组。空数组作为占位样例保留。

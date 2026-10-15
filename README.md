@@ -162,8 +162,11 @@ const { fitFigure, renderHeader, normalizeValue, wrapText, resolveTextCollisions
 | `normalizeValue(value)` | 将 TypedArray 和 Plotly `{ dtype, bdata, shape }` 编码转换为普通数组；无效编码显式报错 |
 | `wrapText(text, fontSize, maxWidth)` | 根据宽度估算换行，保留支持的富文本标记；返回 `{ text, lines }` |
 | `resolveTextCollisions(container)` | 在浏览器渲染后检查 SVG 数据标签，隐藏碰撞或越界的可选标签，返回隐藏数量 |
+| `disconnectTreemapLabels(container)` | 组件卸载/Plotly.purge 前断开树图文字观察器，取消待执行的检查 |
 
 `fitFigure` 返回 `{ data, layout, config, height, header, titleUpdates, legendPlacement, annotationNotes, panels, stacked, yearMenus, warnings }`。仅将 `data`、`layout`、`config` 传给 Plotly；`height` 为 SVG 容器高度，不包括外置标题。`header` 用于 `renderHeader`，内置模式为 `null`；`titleUpdates` 保存按钮标题更新，`legendPlacement` 为 `top` / `bottom` / `preserve`（无图例调整或宽屏内置模式）。`annotationNotes` 记录编号、原标注索引、完整文字及坐标，用于检查说明与原数据的对应关系；完整说明已写入返回的 layout。
+
+树图首次调用 `resolveTextCollisions` / `fitTreemapLabels` 后，会自动观察树图 SVG 的层级和尺寸变化。点击放大、返回或动画结束时，从完整名称重新排字，恢复原来隐藏但现在放得下的文字；不需要业务额外处理每个树图点击。检查在连续两帧无相关 DOM 变化后执行，适配器自身写入期间断开观察，避免循环。组件销毁前调用 `disconnectTreemapLabels(container)`，再执行 `Plotly.purge`。空间不足的方块仍按最小尺寸及可读字号规则隐藏。
 
 ## 本地开发与验证
 
@@ -202,7 +205,7 @@ node tests/responsive.test.js
 
 测试使用 Node.js 内置测试模块，无需安装测试依赖。本仓库在 Node.js 22.22.0 下验证。测试会自动发现 `mocks/mock*.js`，但部分专项测试还依赖特定样例，因此仅添加一个演示文件不能运行完整套件。
 
-截至 2026-10-14，本地完整 fixtures 的规则回归为 **59/59 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字、两种标题/图例模式、图例分列及端点标注说明等约束。
+截至 2026-10-15，本地完整 fixtures 的规则回归为 **59/59 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字、两种标题/图例模式、图例分列及端点标注说明等约束。
 
 ### 移动端视觉验收
 

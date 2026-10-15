@@ -12,6 +12,7 @@
         u8: BigUint64Array, u4: Uint32Array, u2: Uint16Array, u1: Uint8Array, b1: Uint8Array
     };
     const labelVisibility = new WeakMap();
+    const treemapLabelObservers = new WeakMap();
 
     function number(value, fallback) {
         const parsed = Number(value);
@@ -1091,8 +1092,55 @@
         return Object.assign(result, { lines: kept, status: 'ellipsis' });
     }
 
+    function disconnectTreemapLabels(gd) {
+        const state = treemapLabelObservers.get(gd);
+        if (!state) return;
+        state.observer.disconnect();
+        if (state.frame !== null) state.view.cancelAnimationFrame(state.frame);
+        treemapLabelObservers.delete(gd);
+    }
+
+    function watchTreemapLabels(gd) {
+        const existing = treemapLabelObservers.get(gd);
+        if (existing) return existing;
+        const view = gd.ownerDocument && gd.ownerDocument.defaultView;
+        if (!view || !view.MutationObserver || !view.requestAnimationFrame ||
+            !gd.querySelector('.treemaplayer')) return null;
+        const state = { view, frame: null, quietFrames: 0 };
+        state.observe = () => state.observer.observe(gd, {
+            subtree: true, childList: true, characterData: true, attributes: true,
+            attributeFilter: ['d', 'transform', 'style', 'class', 'data-unformatted']
+        });
+        const settled = () => {
+            state.frame = null;
+            if (gd.isConnected === false) { disconnectTreemapLabels(gd); return; }
+            // Native drilldown can rewrite transforms after afterplot. Wait for
+            // two quiet frames, then measure the final cells and full text again.
+            if (++state.quietFrames < 2) state.frame = view.requestAnimationFrame(settled);
+            else fitTreemapLabels(gd);
+        };
+        state.observer = new view.MutationObserver(records => {
+            const inTree = node => node && (node.closest && node.closest('.treemaplayer') ||
+                node.querySelector && node.querySelector('.treemaplayer'));
+            if (!records.some(record => inTree(record.target.nodeType === 3 ? record.target.parentElement : record.target) ||
+                [...record.addedNodes, ...record.removedNodes].some(inTree))) return;
+            state.quietFrames = 0;
+            if (state.frame === null) state.frame = view.requestAnimationFrame(settled);
+        });
+        treemapLabelObservers.set(gd, state);
+        return state;
+    }
+
     function fitTreemapLabels(gd) {
         if (!gd.ownerDocument || !gd.ownerDocument.createElementNS) return;
+        const state = watchTreemapLabels(gd);
+        // Disconnect during our own SVG edits so observation cannot cause a loop.
+        if (state) state.observer.disconnect();
+        try { layoutTreemapLabels(gd); }
+        finally { if (state) state.observe(); }
+    }
+
+    function layoutTreemapLabels(gd) {
         const entries = Array.from(gd.querySelectorAll('.treemaplayer .slice')).map(slice => {
             const surface = slice.querySelector('path.surface');
             const text = slice.querySelector('text.slicetext');
@@ -1190,5 +1238,5 @@
         return hidden;
     }
 
-    return { fitFigure, renderHeader, wrapText, normalizeValue, resolveTextCollisions, fitCellText, fitTreemapLabels };
+    return { fitFigure, renderHeader, wrapText, normalizeValue, resolveTextCollisions, fitCellText, fitTreemapLabels, disconnectTreemapLabels };
 });

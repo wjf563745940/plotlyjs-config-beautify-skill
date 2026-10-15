@@ -1,6 +1,6 @@
 # 接入运行时模板
 
-模板不依赖框架。它导出 fitFigure、renderHeader、normalizeValue、wrapText、resolveTextCollisions，以及树图排字辅助 fitCellText/fitTreemapLabels；在浏览器脚本中是 window.PlotlyResponsive，在 CommonJS 中通过 require 获取。
+模板不依赖框架。它导出 fitFigure、renderHeader、normalizeValue、wrapText、resolveTextCollisions，以及树图排字辅助 fitCellText/fitTreemapLabels 和清理 helper disconnectTreemapLabels；在浏览器脚本中是 window.PlotlyResponsive，在 CommonJS 中通过 require 获取。
 
 本项目固定使用 Plotly 4.1.1，演示入口加载仓库中的 plotly-4.1.1.min.js；其他项目也可使用固定版本 CDN 或其已验证的现代版本。确认标题、legend 和 uniformtext 等属性被该版本支持。[官方版本说明](https://plotly.com/javascript/getting-started/)指出 plotly-latest 已冻结。
 
@@ -23,7 +23,7 @@ fitFigure 返回 {data, layout, config, height, header, titleUpdates, legendPlac
 
 在首次渲染、react、restyle 和 plotly_afterplot 后再次检查标签。用 requestAnimationFrame 合并检查；resolveTextCollisions 会先恢复此前隐藏的标签，再根据新边界判断。首次渲染和 resize 的“就绪”状态应等待标签检查完成，截图或验收不能只等待 newPlot 的 Promise。
 
-组件卸载时取消 requestAnimationFrame、断开 observer、移除事件订阅，并按项目生命周期调用 Plotly.purge。
+组件卸载时取消业务 requestAnimationFrame、断开 ResizeObserver、移除事件订阅，调用 `PlotlyResponsive.disconnectTreemapLabels(container)` 释放内部树图文字观察器，再按项目生命周期调用 Plotly.purge。
 
 ## 外置主标题与顶部图例
 
@@ -83,9 +83,13 @@ container.on('plotly_buttonclicked', event => {
 
 resolveTextCollisions 会先调用 fitTreemapLabels；不需额外事件订阅。它只处理 `.treemaplayer .slice` 的纯文本和已有 `<br>`，从 `data-unformatted` 读取完整的已解析显示文本，使用相同字体的临时 SVG 文字实际测量，再写入逐行 tspan；不访问 Plotly 私有 calcdata，也不改写 trace 的 labels、ids 或 hover 元数据。复杂富文本/数学表达式保留原渲染；不补造 textinfo:none 的叶名称，Plotly 原有分组标题按其显示源处理。
 
+首次文字检查自动安装每容器一个 MutationObserver，仅响应树图的几何、显示或文字变化。点击分支、路径栏返回、原生动画或 react 重写 SVG 后，连续两帧无相关变化时重新测量并恢复符合尺寸的名称；不能只依赖初次 newPlot 或 plotly_afterplot。排字自身的 probe/tspan/style 修改期间断开观察，避免反馈循环；不通过重画整张图修复文字，当前钻取层级与数据保留。卸载前使用 `disconnectTreemapLabels(container)` 断开并取消排队帧。其他图形仍需要按原生命周期调用 resolveTextCollisions。
+
 当前密集图默认最小宽 24px、最小高 18px，扣除 2px 内边距，以原字号尝试完整显示/换行；不足时尝试 10px 下限，再裁切最后一行并添加 `…`。仍容不下有意义文字则隐藏。纯排字 helper `fitCellText(text, width, height, measure, options)` 支持 fontSize/padding/minWidth/minHeight 参数；measure 必须使用对应实际字体，不能用字符数估算替代验收。其他产品采用更大字号时应同步提高门槛并复验。
 
 父框的面积包含子框，不能把整个父框当作文字区：用实际子框的顶部限制标题条高度。处理后再次检查真实文字 bbox；超出对应方块/标题条则隐藏。Latin 优先按空格换行，Unicode 按字素拆分。保留对齐，每次 resize、Plotly.react、点击展开及返回重新读取完整显示源，避免“中…”成为下一次排字源。演示页的“更新图表数据”只更新数值 y 数组，不能用它声称 treemap values 更新交互已验证。
+
+验收需检查双向恢复：小方块允许隐藏，放大后达到可读宽高且名称能换行/省略显示时必须恢复；返回后重新按小框计算。mock21 在 360/480px 的“其他AI / CPU / 云计算”均应逐项点击，不仅检查某一分支。`tests/treemap-drilldown.html` 是仅初次调用一次适配的独立接入回归，避免演示页额外 afterplot 回调掩盖适配器缺少自动恢复的问题。
 
 ## 缺少年份筛选参数的菜单
 
@@ -132,7 +136,7 @@ node tests/responsive.test.js
 按日期保存 `reports/responsive-YYYY-MM-DD/{360px,480px}/results.json` 和完整 JPG；每个结果包含 name、输入 sha256、summary、viewport、charts、screenshot。`manifest.json` 保存 date、plotlyVersion、adapterHash、widths:[360,480]、sourceHashes 和 unitTests；`unit-tests.txt` 保存本次测试输出。实际审阅截图后运行：
 
 ~~~powershell
-node tests/write-responsive-report.js reports/responsive-2026-10-14-mock22
+node tests/write-responsive-report.js reports/responsive-2026-10-15-treemap-drilldown
 ~~~
 
 该命令拒绝缺少 360px、源文件/适配器指纹变更、图表数量不匹配、渲染失败、页面横向溢出、所测文字越界/相交和空层级图等情况，再生成逐图报告和画廊。报告不能代替实际截图审阅。`reports/480px/` 及 write-480-report.js 是上轮的历史验收；新增数据后使用双尺寸报告。
