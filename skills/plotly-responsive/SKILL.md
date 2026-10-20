@@ -1,6 +1,6 @@
 ---
 name: plotly-responsive
-description: Use when model-produced Plotly.js figures have clipped or overlapping text, wasted legend space, data squeezed by margins or annotation autorange, unreadable in-plot annotations, unnecessarily hidden treemap names, or year selectors inconsistent with displayed data, in responsive frontend containers including 360px mobile viewports.
+description: Use when model-produced Plotly.js figures have clipped or overlapping text, wasted legend space, data squeezed by margins or annotation autorange, unreadable in-plot annotations, unnecessarily hidden treemap names, invalid numeric hover values, or year selectors inconsistent with displayed data, in responsive frontend containers including 360px mobile viewports.
 ---
 
 # Plotly 响应式解析与布局
@@ -14,12 +14,13 @@ description: Use when model-produced Plotly.js figures have clipped or overlappi
 1. 检查模型原文、运行中的 Plotly 版本、容器实际宽度、轨迹类型、坐标轴引用、domain、注释和控件。将失败输入保留为原始 fixture。
 2. 在这些视口及桌面宽度检查标题、图例、坐标轴、色条、子图标题、数据标签和控件；再检查窄到宽、宽到窄、数据更新后的布局。区分主标题、子图标题和数据坐标上的基准线标注：后者常因曲线穿过透明文字底而不可读，即使文字边界互不相交。记录 innerWidth、页面 clientWidth 和真实图表宽度。文字测量应使用渲染结果的边界，不能把字符数估算当作视觉通过。检查图形确实存在：就绪状态、空白树图或亚像素柱宽不能通过验收；检查 SVG clip-path，文字在卡片内仍可能被绘图区裁切。
 3. 在适配层修复一般原因。对源 figure 做独立副本，每次 resize 从源配置重新计算，保留数据值、轴引用、关联关系与交互状态。根据拥挤程度增加纵向空间或把并排子图改为纵向，避免仅缩小整个图表。
-4. 为发现的问题增加能检查实际约束的回归：子图不相交、标题仍有对应子图、数值与引用保留、交互控件分区、源输入不变。控件修复还要逐项点击，确认真实数据、选中项和标题一致，并检查展开、resize、数据更新及恢复全部。本仓库运行 `node tests/responsive.test.js`，自动发现 `mocks/mock*.js`；其他项目使用其回归入口。浏览器验收须等待全部图表及渲染后的标签检查完成，再保存完整截图和 SVG 边界结果。本仓库使用 tests/browser-layout-audit.js 的只读函数，传入原始 fixture 的数据注释索引，采集全部当前 mocks 的 360px 与 480px；外置模式检查标题在卡片内、SVG 之前、完整且不重复，默认顶部图例；显式内置模式补充窄屏/宽屏位置验收。检查真实注释底色不透明、文字在底框内、各可见 tspan 的最低对比度至少 4.5:1。树图还要检查标签所在方块/父标题条的实际宽高、字号、换行和省略号，点击展开及返回再复验。保存输入/适配器 SHA-256 和测试输出，运行 `node tests/write-responsive-report.js reports/responsive-YYYY-MM-DD`。最新产物在 reports/responsive-2026-10-15-treemap-drilldown/；此前按日期保留的 reports 是历史证据。
-5. 另验收空间利用率：记录图例实际列数、行数、条目数、绘图区宽高与数据路径边界；没有碰撞不代表布局合理。若图形挤在一侧，分别检查 margin/domain、自动轴范围中的 annotations/shapes、作者显式 range 和真实稀疏数据。先定位空间消耗来源，再修复，不能一律增加图高或强制设定数据范围。本轮最新产物为 reports/responsive-2026-10-15-treemap-drilldown/；mock22 专项门槛为至少两列、行情横向占用至少 85%、全部长说明存在。该比例不用于作者指定的范围或稀疏散点。
+4. 为发现的问题增加能检查实际约束的回归：子图不相交、标题仍有对应子图、数值与引用保留、交互控件分区、源输入不变。控件修复还要逐项点击，确认真实数据、选中项和标题一致，并检查展开、resize、数据更新及恢复全部。本仓库运行 `node tests/responsive.test.js`，自动发现 `mocks/mock*.js`；其他项目使用其回归入口。浏览器验收须等待全部图表及渲染后的标签检查完成，再保存完整截图和 SVG 边界结果。本仓库使用 tests/browser-layout-audit.js 的只读函数，传入原始 fixture 的数据注释索引，采集全部当前 mocks 的 360px 与 480px；外置模式检查标题在卡片内、SVG 之前、完整且不重复，默认顶部图例；显式内置模式补充窄屏/宽屏位置验收。检查真实注释底色不透明、文字在底框内、各可见 tspan 的最低对比度至少 4.5:1。树图还要检查标签所在方块/父标题条的实际宽高、字号、换行和省略号，点击展开及返回再复验。保存输入/适配器 SHA-256 和测试输出，运行 `node tests/write-responsive-report.js reports/responsive-YYYY-MM-DD`。最新产物在 reports/responsive-2026-10-20-hover/；此前按日期保留的 reports 是历史证据。
+5. 另验收空间利用率：记录图例实际列数、行数、条目数、绘图区宽高与数据路径边界；没有碰撞不代表布局合理。若图形挤在一侧，分别检查 margin/domain、自动轴范围中的 annotations/shapes、作者显式 range 和真实稀疏数据。先定位空间消耗来源，再修复，不能一律增加图高或强制设定数据范围。本轮最新产物为 reports/responsive-2026-10-20-hover/；mock22 专项门槛为至少两列、行情横向占用至少 85%、全部长说明存在。该比例不用于作者指定的范围或稀疏散点。
 6. 将输入名、原因、修复和验证范围记录在 [references/fix-log.md](references/fix-log.md)。未做视觉验证或输入本身缺少交互语义时明确记录。
 
 ## 已验证的处理原则
 
+- 悬停出现 NaN 时先解码核对源字段，区分源缺失与模板取值/格式化失败。有效数字正常显示，无效数值字段逐点显示 `--`，不补成 0、不全局替换业务文字。Plotly 4.1.1 饼图 customdata 的聚合层级、重复标签及支持边界见 [references/hover-values.md](references/hover-values.md)。验收应实际悬停全部受影响点，对照源值；静态布局检查不能证明提示框正确。
 - 使用容器宽度与 ResizeObserver。config.responsive 处理窗口 resize，不能替代容器变化时的重新适配。
 - 使用固定的现代 Plotly 版本。plotly-latest 冻结在 1.58.5，不能据此判断现代布局属性是否有效。
 - 默认外置主标题与说明性副标题，使用 HTML 自然换行且只显示一次；渲染副本清空 SVG 主标题，必须接入返回的 header/renderHeader。图例保持 Plotly 原生交互，位于 SVG 顶部并独立预算行高，子图/轴标题和数据标注保留。只有显式 titlePlacement=internal 才考虑窄屏拥挤时的底部图例；短内置标题可与少量图例共存于顶部，宽屏保留作者图例配置与子图排列。不得因手机规则强制修改大尺寸图例。接入、按钮同步与导出规则见 integration.md。

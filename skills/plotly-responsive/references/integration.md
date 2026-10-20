@@ -1,6 +1,8 @@
 # 接入运行时模板
 
-模板不依赖框架。它导出 fitFigure、renderHeader、normalizeValue、wrapText、resolveTextCollisions，以及树图排字辅助 fitCellText/fitTreemapLabels 和清理 helper disconnectTreemapLabels；在浏览器脚本中是 window.PlotlyResponsive，在 CommonJS 中通过 require 获取。
+模板不依赖框架。它导出 fitFigure、renderHeader、normalizeValue、normalizeHoverTemplates、wrapText、resolveTextCollisions，以及树图排字辅助 fitCellText/fitTreemapLabels 和清理 helper disconnectTreemapLabels；在浏览器脚本中是 window.PlotlyResponsive，在 CommonJS 中通过 require 获取。
+
+fitFigure 自动修正支持的悬停数值字段：有效数字保留原生格式，缺失或无效单元格显示 `--`。饼图需要按当前 Plotly 聚合后的 metadata 层级取值；只使用 helper 时先 normalizeValue 解码。不要将带占位符的渲染副本作为后续更新源。支持类型、重复 label 的 warning 和实际悬停验收见 [hover-values.md](hover-values.md)。
 
 本项目固定使用 Plotly 4.1.1，演示入口加载仓库中的 plotly-4.1.1.min.js；其他项目也可使用固定版本 CDN 或其已验证的现代版本。确认标题、legend 和 uniformtext 等属性被该版本支持。[官方版本说明](https://plotly.com/javascript/getting-started/)指出 plotly-latest 已冻结。
 

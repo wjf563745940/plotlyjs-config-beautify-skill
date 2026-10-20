@@ -160,6 +160,7 @@ const { fitFigure, renderHeader, normalizeValue, wrapText, resolveTextCollisions
 | `fitFigure(figure, width, options?)` | 根据容器宽度生成适配结果，不修改传入对象；支持 `options.titlePlacement` 与 `options.yearSelections` |
 | `renderHeader(element, header)` | 将返回的外置标题渲染到图表前的 HTML 容器；内置模式传入 `null` 时清空并隐藏 |
 | `normalizeValue(value)` | 将 TypedArray 和 Plotly `{ dtype, bdata, shape }` 编码转换为普通数组；无效编码显式报错 |
+| `normalizeHoverTemplates(trace, warnings?)` | 对解码后的 trace 修正支持的 customdata 悬停取值；无效单元格显示 `--`，fitFigure 自动调用 |
 | `wrapText(text, fontSize, maxWidth)` | 根据宽度估算换行，保留支持的富文本标记；返回 `{ text, lines }` |
 | `resolveTextCollisions(container)` | 在浏览器渲染后检查 SVG 数据标签，隐藏碰撞或越界的可选标签，返回隐藏数量 |
 | `disconnectTreemapLabels(container)` | 组件卸载/Plotly.purge 前断开树图文字观察器，取消待执行的检查 |
@@ -205,7 +206,9 @@ node tests/responsive.test.js
 
 测试使用 Node.js 内置测试模块，无需安装测试依赖。本仓库在 Node.js 22.22.0 下验证。测试会自动发现 `mocks/mock*.js`，但部分专项测试还依赖特定样例，因此仅添加一个演示文件不能运行完整套件。
 
-截至 2026-10-15，本地完整 fixtures 的规则回归为 **59/59 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字、两种标题/图例模式、图例分列及端点标注说明等约束。
+截至 2026-10-20，本地完整 fixtures 的规则回归为 **62/62 通过**，覆盖数据值与轴引用保留、源输入不变、子图布局、宽屏恢复、编码数组、年份筛选、标注可读性、树图排字、两种标题/图例模式、图例分列、端点标注说明及悬停数值显示等约束。
+
+mock16_point 的业务收入有有效原始数据，原来的 NaN 来自饼图 hovertemplate 的 metadata 索引层级错误；毛利率与利润占比则是源 NaN。现在有效收入正常显示，缺失或无效字段显示 `--`，保留原数据、零值、负值及数值格式。处理范围和逐项验收见 [悬停数值说明](skills/plotly-responsive/references/hover-values.md)。
 
 ### 移动端视觉验收
 

@@ -829,6 +829,50 @@
         return updates;
     }
 
+    function normalizeHoverTemplates(trace, warnings = []) {
+        if (!trace || !['pie', 'bar', 'scatter', 'scattergl', 'scatterpolar', 'scatterpolargl'].includes(trace.type || 'scatter')) return trace;
+        const original = trace.hovertemplate;
+        const templates = Array.isArray(original) ? original : [original];
+        if (!templates.some(value => typeof value === 'string' && /%\{customdata(?:\[\d+\])?(?=[:|}])/.test(value))) return trace;
+        const metadata = Array.isArray(trace.customdata) ? trace.customdata : [];
+        const points = ['labels', 'x', 'y', 'r', 'values'].map(key => trace[key]).find(Array.isArray);
+        const count = points ? points.length : metadata.length;
+        if (!count) return trace;
+        const pie = trace.type === 'pie';
+        const seen = new Set(), duplicates = new Set();
+        if (pie && Array.isArray(trace.labels)) trace.labels.forEach(label => {
+            const key = String(label);
+            if (seen.has(key)) duplicates.add(key);
+            seen.add(key);
+        });
+        let ambiguous = false;
+        const next = Array.from({ length: count }, (_, point) => {
+            const template = Array.isArray(original) ? original[point] : original;
+            if (typeof template !== 'string') return template;
+            return template.replace(/%\{customdata(?:\[(\d+)\])?((?::|\|)[^{}]*)?\}/g, (match, index, format = '') => {
+                // A pie slice aggregates rows by label. Multiple source rows have
+                // no implicit business aggregation for arbitrary metadata.
+                if (pie && duplicates.has(String(trace.labels[point]))) { ambiguous = true; return '--'; }
+                const row = metadata[point];
+                const column = index === undefined ? null : Number(index);
+                const value = column === null ? row : Array.isArray(row) ? row[column] : column === 0 ? row : undefined;
+                if (Array.isArray(value) && !format) return match;
+                const missing = value == null || (typeof value === 'number' && !Number.isFinite(value)) ||
+                    (typeof value === 'string' && (!value.trim() || /^[+-]?(?:nan|infinity)$/i.test(value.trim())));
+                const invalidNumber = format.charAt(0) === ':' && !(
+                    (typeof value === 'number' || typeof value === 'string') && !missing && Number.isFinite(Number(value))
+                );
+                if (missing || invalidNumber) return '--';
+                // Plotly 4.1.1 pie hover customdata is [sourceRow], even with
+                // unique labels. Preserve native formatting and metadata values.
+                if (pie) return `%{customdata${column !== null && Array.isArray(row) ? `[0][${column}]` : '[0]'}${format}}`;
+                return column !== null && !Array.isArray(row) ? `%{customdata${format}}` : match;
+            });
+        });
+        if (ambiguous) warnings.push('饼图重复标签会汇总多个原始点，customdata 聚合口径不明确；对应悬停字段显示 --，原始数据保留。');
+        return Object.assign({}, trace, { hovertemplate: !Array.isArray(original) && next.every(value => value === next[0]) ? next[0] : next });
+    }
+
     function fitFigure(figure, measuredWidth, options = {}) {
         const width = Math.max(1, Math.floor(number(measuredWidth, 360)));
         const mobile = width < MOBILE_WIDTH;
@@ -838,6 +882,7 @@
         const layout = normalizeValue(sourceLayout);
         const config = Object.assign({}, figure.config || {}, { responsive: true });
         const warnings = [];
+        for (let index = 0; index < data.length; index++) data[index] = normalizeHoverTemplates(data[index], warnings);
         const yearMenus = repairYearMenu(data, layout, options, warnings, figure.frames);
         delete layout.width;
         layout.autosize = true;
@@ -1238,5 +1283,5 @@
         return hidden;
     }
 
-    return { fitFigure, renderHeader, wrapText, normalizeValue, resolveTextCollisions, fitCellText, fitTreemapLabels, disconnectTreemapLabels };
+    return { fitFigure, renderHeader, wrapText, normalizeValue, normalizeHoverTemplates, resolveTextCollisions, fitCellText, fitTreemapLabels, disconnectTreemapLabels };
 });
